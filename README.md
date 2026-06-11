@@ -9,7 +9,6 @@
 - **保护 uv** —— 普通用户无法修改 uv 二进制或默认 Python 版本
 - **可配置前缀** —— 默认装到 `/opt/uv`,可改到任意目录
 - **自动选源** —— 安装时用 `cnpip` 测速挑最快的国内镜像
-- **幂等** —— `install` 可重复执行以修复权限或升级
 
 ## 环境要求
 
@@ -28,7 +27,7 @@
 ```bash
 sudo ./muv install                      # 装到默认 /opt/uv,并测速选镜像
 sudo ./muv install --prefix /srv/uv     # 自定义安装前缀
-sudo ./muv install --index <url>        # 指定镜像源,跳过测速
+sudo ./muv install --index <url>        # 指定镜像源,不执行镜像测速
 sudo ./muv install --python 3.12        # 指定默认 Python 版本
 ```
 
@@ -36,10 +35,10 @@ sudo ./muv install --python 3.12        # 指定默认 Python 版本
 
 ## 快速开始
 
-**管理员**把用户加入 `uvusers` 组(需 root,用户需重新登录生效):
+**管理员**将用户加入 `uvusers` 组(需 root,用户需重新登录生效):
 
 ```bash
-sudo muv add-admin alice bob
+sudo muv grant alice bob
 ```
 
 **每个用户**在 `~/.bashrc` / `~/.zshrc` 中加一行:
@@ -48,7 +47,7 @@ sudo muv add-admin alice bob
 source /opt/uv/env.sh        # 若改了前缀,换成 $PREFIX/env.sh
 ```
 
-之后**全程无需 sudo**:
+之后可直接使用共享 `uv` 环境:
 
 ```bash
 uv venv --python 3.12 && source .venv/bin/activate
@@ -59,13 +58,13 @@ uv pip install requests       # 命中共享缓存
 
 | 命令 | 作用 | 权限 |
 |------|------|------|
-| `muv install [--prefix d] [--group g] [--index url\|--no-mirror] [--python X.Y]` | 安装/修复共享环境(幂等) | root(自动 sudo) |
-| `muv add-admin <user>...` | 把用户加入 `uvusers` 组 | root(自动 sudo) |
-| `muv rm-admin <user>...` | 把用户移出 `uvusers` 组 | root(自动 sudo) |
-| `muv set-index [<url>]` | 替换镜像源;不带 url 用 cnpip 测速自动选最快 | uvusers 成员 |
+| `muv install [--prefix d] [--group g] [--index url\|--no-mirror] [--python X.Y]` | 安装/修复共享环境 | root |
+| `muv grant <user>...` | 把用户加入 `uvusers` 组 | root |
+| `muv revoke <user>...` | 把用户移出 `uvusers` 组 | root |
+| `muv mirror [<url>]` | 替换镜像源;不带 url 用 cnpip 测速自动选最快 | uvusers 成员 |
 | `muv update` | 从官网下载最新 uv 并替换共享二进制 | uvusers 成员 |
 | `muv python add <ver>` | 安装共享 Python | uvusers 成员 |
-| `muv python rm <ver> [-y] [--check]` | 删除共享 Python（默认仅警告+确认；`--check` 才全盘扫描依赖的 venv） | uvusers 成员 |
+| `muv python rm <ver>` | 删除共享 Python(删除前显示风险提示并要求确认) | uvusers 成员 |
 | `muv python list` | 列出已安装的共享 Python | 任何人 |
 | `muv doctor` | 自检:组 / 权限 / ACL / 二进制 / 当前源 | 任何人 |
 | `muv help` | 显示帮助 | 任何人 |
@@ -76,9 +75,8 @@ uv pip install requests       # 命中共享缓存
 
 ```
 $PREFIX/                   # 默认 /opt/uv
-├── muv                    # 管理命令
 ├── env.sh                 # 用户 source 的环境脚本(664 root:uvusers)
-├── bin/                   # 2775 root:uvusers — uv/uvx/pip + Python symlink
+├── bin/                   # 2775 root:uvusers — uv/uvx/pip/muv + Python symlink
 ├── cache/                 # 2777 uvusers:uvusers — 共享缓存(所有用户可写)
 ├── python/                # 2775 root:uvusers — 共享 Python(仅管理员可装/删)
 ├── python-cache/          # 2775 root:uvusers — Python 下载缓存(仅管理员可写)
@@ -89,12 +87,12 @@ $PREFIX/                   # 默认 /opt/uv
 
 - **Python 集中管理** —— `python/`、`python-cache/` 为 `2775 root:uvusers`,只有管理员能装/删 Python;普通用户 `env.sh` 里 `UV_PYTHON_DOWNLOADS=never`,只能使用预置版本,需要新版本时找管理员 `muv python add`。这样避免版本在各用户家目录里分散。`cache/` 则对所有用户可写,便于任意用户清理可重建的缓存。
 - **default ACL** —— 共享目录用目录级 default ACL 保证新建文件对组(及 `cache` 的 others)可写,`env.sh` 不改用户 umask。
-- **保护 uv** —— `bin/` 为 `2775 root:uvusers` 且 ACL `other::r-x`:非 uvusers 用户既无法改 `bin/uv` 内容,也无法在 `bin/` 内替换它,从文件系统层强制"只有 uv 管理员能管 uv"。`muv` 的成员校验只是更友好的报错,不是唯一防线。
+- **保护 uv/muv** —— `bin/` 为 `2775 root:uvusers` 且 ACL `other::r-x`:非 uvusers 用户既无法改 `bin/uv` / `bin/muv` 内容,也无法在 `bin/` 内替换它们,从文件系统层强制"只有 uv 管理员能管 uv"。`muv` 的成员校验只是更友好的报错,不是唯一防线。
 - **hardlink** —— `UV_LINK_MODE=hardlink` 让多用户 venv 共享缓存数据块,要求缓存与用户 home 在同一文件系统分区,跨分区自动 fallback 到 copy(`muv install` 会提示)。
 
 ### sudo 边界
 
-日常使用不碰 sudo。仅 `install` / `add-admin` / `rm-admin` 需要 root(建组、建目录、改 `/etc/group`),`muv` 会自动提权重跑。`set-index` / `update` / `doctor` 只需 `uvusers` 成员身份——因为 `env.sh`(组可写)和 `bin/`(setgid 组可写)都对该组开放。
+常规使用不需要 sudo。`install` / `grant` / `revoke` 需要 root(建组、建目录、修改 `/etc/group`),`muv` 会通过 sudo 重新执行。`mirror` / `update` / `doctor` 需要 `uvusers` 成员身份,因为 `env.sh`(组可写)和 `bin/`(setgid 组可写)都对该组开放。
 
 ## 配置(env.sh)
 
@@ -114,18 +112,18 @@ $PREFIX/                   # 默认 /opt/uv
 
 | 操作 | 管理员 | 普通用户 |
 |------|--------|----------|
-| 运行 `uv`/`uvx`、用共享缓存与镜像源 | ✅ | ✅ |
-| 使用已安装的 Python | ✅ | ✅ |
-| 安装 Python 到共享目录 | ✅ | ❌ 目录仅管理员可写 |
-| 删除共享 Python | ✅ | ❌ |
-| 创建 Python symlink 到 `$UV_ROOT/bin/` | ✅ | ❌(进 `~/.local/bin/`) |
-| 安装/卸载共享工具 | ✅ | ❌(装到 `~/.local/`) |
-| 修改 uv/uvx 二进制 | ✅ | ❌ |
+| 运行 `uv`/`uvx`、使用共享缓存与镜像源 | 允许 | 允许 |
+| 使用已安装的 Python | 允许 | 允许 |
+| 安装 Python 到共享目录 | 允许 | 不允许(目录仅管理员可写) |
+| 删除共享 Python | 允许 | 不允许 |
+| 创建 Python symlink 到 `$UV_ROOT/bin/` | 允许 | 不允许(写入 `~/.local/bin`) |
+| 安装/卸载共享工具 | 允许 | 不允许(写入 `~/.local`) |
+| 修改 uv/uvx 二进制 | 允许 | 不允许 |
 
 ## 运维
 
 - **磁盘** —— 用户可持续往 `python/` 装版本、缓存也持续增长,无自动清理。定期看 `df`,必要时由管理员 `source env.sh` 后 `uv cache prune`(清陈旧条目)或低峰期 `uv cache clean`(整体清空,可重新下载恢复)。换源只留下少量索引元数据,不影响占大头的解包内容。
-- **删除共享 Python 有风险** —— venv 通过 symlink(及 `pyvenv.cfg` 路径)指向共享解释器,删掉会让依赖它的 venv 全部失效(python 变悬空链接)。用 `muv python rm` 而非裸 `uv python uninstall`:默认给出警告并要求确认。误删后 `muv python add <ver>` 装回同一路径即可自愈,无需重建 venv——所以一般不必事先排查。确实想列出受影响的 venv 时加 `--check`,它会全盘扫描 `/home`、`/root`、`/opt`(symlink/路径无反向索引,只能扫,较慢)。
+- **删除共享 Python 有风险** —— venv 通过 symlink(及 `pyvenv.cfg` 路径)指向共享解释器,删除共享解释器会使依赖该路径的 venv 无法运行。使用 `muv python rm`,不要直接执行 `uv python uninstall`:删除前会显示风险提示并要求确认。误删后重新执行 `muv python add <ver>` 可恢复同一路径,无需重建 venv。`muv` 不扫描用户目录,也不提供 venv 反向索引。
 - **组成员变更** —— 加入/移除 `uvusers` 组后需重新登录生效。
 - **升级 uv** —— `muv update`,从官网拉最新版并打印 old → new 版本。
 

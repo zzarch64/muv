@@ -7,8 +7,8 @@ UV_GROUP="${UV_GROUP:-uvusers}"
 
 # 所有用户都能用的部分
 export UV_CACHE_DIR=${UV_ROOT}/cache
-# 镜像源：下方默认值由 install.sh 用 cnpip 测速后替换；用户可在 source 前预设覆盖
-export UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX:-https://mirrors.aliyun.com/pypi/simple/}
+# 镜像源：下方默认值由 muv install/mirror 用 cnpip 测速后替换；用户可在 source 前预设覆盖
+export UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple/}
 
 # uv-managed Python 共享存储（仅管理员可写，版本集中管理）
 export UV_PYTHON_INSTALL_DIR=${UV_ROOT}/python

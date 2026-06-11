@@ -1,26 +1,38 @@
 #!/usr/bin/env bash
 #
-# muv — 管理 /opt/uv 共享 uv 环境（初始化 + 日常运维）
+# muv - 共享 uv 环境管理器
 #
-# 命令：
-#   muv install [--prefix <dir>] [--group <name>] [--index <url>|--no-mirror] [--python X.Y]
-#                                安装/修复共享环境（幂等）
-#                                安装位置默认 /opt/uv，可用 --prefix 或 UV_ROOT 覆盖
-#   muv set-index [<url>]        替换镜像源；不带 url 则用 cnpip 测速自动选最快
-#   muv add-admin <user>...      把用户加入 uvusers 管理员组
-#   muv rm-admin  <user>...      把用户移出 uvusers 管理员组
-#   muv update                   从官网下载最新 uv 并替换共享二进制
-#   muv python add <ver>         安装共享 Python（uvusers 成员）
-#   muv python rm  <ver> [-y] [--check]
-#                                删除共享 Python（uvusers）；--check 才全盘扫描依赖的 venv
-#   muv python list              列出已安装的共享 Python
-#   (普通用户不能安装/删除共享 Python，只能使用管理员预置的版本)
-#   muv doctor                   自检：组 / 权限 / ACL / 二进制
-#   muv help                     显示本帮助
+# 用法:
+#   muv <command> [options]
+#   muv help
 #
-# 日常使用（source env.sh 后的 uv/uvx）无需 sudo。
-# install / add-admin / rm-admin 需要 root（建组、建目录、改组成员），会自动用 sudo 重跑。
-# set-index / update / doctor 仅需 uvusers 组成员，无需 sudo。
+# 命令:
+#   install [options]              安装或修复共享 uv 环境。
+#     --prefix <dir>               安装前缀。默认: /opt/uv。
+#     --group <name>               管理员组。默认: uvusers。
+#     --index <url>                配置默认包索引地址。
+#     --no-mirror                  不执行镜像自动选择。
+#     --python <version>           安装默认托管 Python 版本。
+#
+#   mirror [url]                   配置镜像源。未提供 url 时自动选择。
+#   grant <user>...                授权用户管理权限。
+#   revoke <user>...               撤销用户管理权限。
+#   update                         下载并替换 uv 与 uvx。
+#   python add <version>           安装共享托管 Python 版本。
+#   python rm <version>            删除共享托管 Python 版本。
+#                                  删除前显示风险提示并要求确认。
+#   python list                    列出已安装的共享 Python 版本。
+#   doctor                         检查组、权限、ACL、二进制与索引状态。
+#   help                           显示帮助信息。
+#
+# 权限:
+#   install, grant, revoke         需要 root；非 root 调用会通过 sudo 重新执行。
+#   mirror, update                 需要 root 或 UV_GROUP 成员身份。
+#   python add, python rm          需要 root 或 UV_GROUP 成员身份。
+#   python list, doctor, help      任意用户可执行。
+#
+# Shell 初始化:
+#   source /opt/uv/env.sh
 #
 set -euo pipefail
 
@@ -32,14 +44,14 @@ log()  { printf '\033[1;32m[muv]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
-# uvusers 组成员或 root 即可（用于只改组可写文件的命令，不提权）
+# root 或管理员组成员可执行组可写资源的管理命令。
 require_admin() {
   [ "$(id -u)" -eq 0 ] && return 0
   id -nG 2>/dev/null | tr ' ' '\n' | grep -qx "$UV_GROUP" && return 0
   die "需要是 root 或 $UV_GROUP 组成员才能执行此命令"
 }
 
-# 需要 root 的命令：非 root 时用 sudo 重新执行整条命令
+# root 命令由非 root 调用时通过 sudo 重新执行。
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     command -v sudo >/dev/null 2>&1 || die "需要 root 权限，且未找到 sudo"
@@ -47,7 +59,7 @@ need_root() {
   fi
 }
 
-# 在共享环境变量下运行 uv/uvx（init 时 env.sh 可能还没装好）
+# 使用共享环境变量执行 uv/uvx。
 uv_env() {
   PATH="$UV_ROOT/bin:$PATH" \
   UV_CACHE_DIR="$UV_ROOT/cache" UV_PYTHON_INSTALL_DIR="$UV_ROOT/python" \
@@ -56,7 +68,7 @@ uv_env() {
   UV_PYTHON_DOWNLOADS=manual "$@"
 }
 
-# 用 cnpip 测速取最快镜像 URL（输出到 stdout，失败返回非 0）
+# 使用 cnpip 选择镜像 URL。
 pick_fastest_index() {
   local out url
   out="$(uv_env "$UV_ROOT/bin/uvx" cnpip list 2>/dev/null)" || return 1
@@ -65,22 +77,22 @@ pick_fastest_index() {
   [ -n "$url" ] && { printf '%s\n' "$url"; return 0; } || return 1
 }
 
-# 把镜像源写回 env.sh 的 UV_DEFAULT_INDEX 默认值
+# 写入 env.sh 的 UV_DEFAULT_INDEX 默认值。
 write_index() {
   local url="$1"
-  [ -f "$ENV_FILE" ] || die "未找到 $ENV_FILE，先跑 muv install"
+  [ -f "$ENV_FILE" ] || die "未找到 $ENV_FILE，请先执行 muv install"
   sed -i -E "s#(export UV_DEFAULT_INDEX=\\\$\{UV_DEFAULT_INDEX:-)[^}]*(\})#\1${url}\2#" "$ENV_FILE"
   grep -q "UV_DEFAULT_INDEX:-${url}}" "$ENV_FILE" \
     || die "写入失败，请检查 $ENV_FILE 中的 UV_DEFAULT_INDEX 行"
   log "镜像源已写入 env.sh: $url"
 }
 
-# 用官方脚本把 uv/uvx 下载到指定目录（不改 PATH/profile）
+# 使用官方安装脚本下载 uv/uvx 到指定目录。
 bootstrap_uv() {
   local dest="$1"
   command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
     || die "需要 curl 或 wget 下载 uv，或手动把 uv/uvx 放入 bin/ 后重试"
-  log "未找到 uv 二进制，从 astral.sh 下载到 $dest …"
+  log "未找到 uv 二进制，从 astral.sh 下载到 $dest"
   mkdir -p "$dest"
   local fetch
   if command -v curl >/dev/null 2>&1; then fetch="curl -LsSf https://astral.sh/uv/install.sh"
@@ -114,7 +126,7 @@ cmd_init() {
     if [ -x "$base/uv" ] && [ -x "$base/uvx" ]; then uv_src="$base/uv"; uvx_src="$base/uvx"; break; fi
   done
   if [ -z "${uv_src:-}" ]; then
-    # 仓库未自带二进制时，自动用官方脚本下载到临时目录
+  # 仓库未自带二进制时，使用官方脚本下载到临时目录。
     local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
     bootstrap_uv "$tmp"
     uv_src="$tmp/uv"; uvx_src="$tmp/uvx"
@@ -125,12 +137,12 @@ cmd_init() {
   rfs="$(df -P "$(dirname "$UV_ROOT")" 2>/dev/null | awk 'NR==2{print $1}')"
   hfs="$(df -P /home 2>/dev/null | awk 'NR==2{print $1}')"
   [ -n "$rfs" ] && [ -n "$hfs" ] && [ "$rfs" != "$hfs" ] \
-    && warn "$UV_ROOT 与 /home 不同分区，hardlink 会退化为 copy"
+    && warn "$UV_ROOT 与 /home 不同分区，hardlink 将退化为 copy"
 
   getent group "$UV_GROUP" >/dev/null && log "组 $UV_GROUP 已存在" \
     || { log "创建组 $UV_GROUP"; groupadd "$UV_GROUP"; }
 
-  log "创建目录 + 权限"
+  log "创建目录并设置权限"
   mkdir -p "$UV_ROOT"/{bin,cache,python,python-cache,tools}
   # 仅管理员可写：bin/tools/python/python-cache（Python 版本由管理员集中管理）
   for d in "$UV_ROOT" "$UV_ROOT"/{bin,tools,python,python-cache}; do
@@ -151,19 +163,19 @@ cmd_init() {
   chmod 0755 "$UV_ROOT/bin/pip"
   [ -f "$src_dir/env.sh" ] && [ "$src_dir" != "$UV_ROOT" ] \
     && install -m 0664 "$src_dir/env.sh" "$ENV_FILE"
-  # env.sh 设为组可写，uvusers 管理员可免 sudo 跑 set-index
+  # env.sh 设为组可写，管理员可直接执行 set-index。
   chown root:"$UV_GROUP" "$ENV_FILE" 2>/dev/null || true
   chmod 0664 "$ENV_FILE"
-  # 把所选前缀/组烘焙进部署后的 env.sh 默认值（仍允许用户 env 覆盖）
+  # 将所选前缀和组写入部署后的 env.sh 默认值；仍允许环境变量覆盖。
   sed -i -E "s#(UV_ROOT=\"\\\$\{UV_ROOT:-)[^}]*(\}\")#\1${UV_ROOT}\2#;
              s#(UV_GROUP=\"\\\$\{UV_GROUP:-)[^}]*(\}\")#\1${UV_GROUP}\2#" "$ENV_FILE"
-  # 把 muv 自己装到共享 bin（仅管理员可写）
+  # 将 muv 安装到共享 bin。
   [ "$(readlink -f "$0")" = "$UV_ROOT/bin/muv" ] \
     || install -m 0775 -o root -g "$UV_GROUP" "$(readlink -f "$0")" "$UV_ROOT/bin/muv"
 
   if [ "$do_mirror" -eq 1 ]; then
-    log "cnpip 测速选最快镜像…"
-    index_url="$(pick_fastest_index)" && log "最快: $index_url" || warn "测速失败，保留现有源"
+    log "使用 cnpip 选择镜像"
+    index_url="$(pick_fastest_index)" && log "选择镜像: $index_url" || warn "镜像选择失败，保留当前配置"
   fi
   [ -n "$index_url" ] && write_index "$index_url"
 
@@ -181,8 +193,8 @@ cmd_init() {
   cmd_doctor
   cat <<EOF
 
-完成。用户在 ~/.bashrc 加入：  source $ENV_FILE
-muv 已就绪，后续可直接用：muv set-index / muv add-admin <user> 等
+安装完成。请在用户 shell 配置中加入：source $ENV_FILE
+管理命令已安装到：$UV_ROOT/bin/muv
 EOF
 }
 
@@ -190,28 +202,28 @@ cmd_set_index() {
   require_admin
   local url="${1:-}"
   if [ -z "$url" ]; then
-    log "cnpip 测速选最快镜像…"
-    url="$(pick_fastest_index)" || die "测速失败，请显式指定: muv set-index <url>"
-    log "最快: $url"
+    log "使用 cnpip 选择镜像"
+    url="$(pick_fastest_index)" || die "镜像选择失败，请显式指定: muv mirror <url>"
+    log "选择镜像: $url"
   fi
   write_index "$url"
 }
 
-cmd_add_admin() {
+cmd_grant() {
   need_root
-  [ $# -gt 0 ] || die "用法: muv add-admin <user>..."
-  getent group "$UV_GROUP" >/dev/null || die "组 $UV_GROUP 不存在，先跑 muv install"
+  [ $# -gt 0 ] || die "用法: muv grant <user>..."
+  getent group "$UV_GROUP" >/dev/null || die "组 $UV_GROUP 不存在，请先执行 muv install"
   for u in "$@"; do
-    id "$u" >/dev/null 2>&1 || { warn "用户 $u 不存在，跳过"; continue; }
+    id "$u" >/dev/null 2>&1 || { warn "用户 $u 不存在，已忽略"; continue; }
     usermod -aG "$UV_GROUP" "$u" && log "$u 已加入 $UV_GROUP（需重新登录生效）"
   done
 }
 
-cmd_rm_admin() {
+cmd_revoke() {
   need_root
-  [ $# -gt 0 ] || die "用法: muv rm-admin <user>..."
+  [ $# -gt 0 ] || die "用法: muv revoke <user>..."
   for u in "$@"; do
-    id "$u" >/dev/null 2>&1 || { warn "用户 $u 不存在，跳过"; continue; }
+    id "$u" >/dev/null 2>&1 || { warn "用户 $u 不存在，已忽略"; continue; }
     gpasswd -d "$u" "$UV_GROUP" && log "$u 已移出 $UV_GROUP（需重新登录生效）"
   done
 }
@@ -229,25 +241,16 @@ cmd_update() {
   log "uv 已更新: $old -> $new"
 }
 
-# 扫描各用户 venv 的 pyvenv.cfg，找出仍指向某解释器目录的 venv（best-effort）
-venvs_using() {
-  local pbase="$1" cfg
-  for root in /home /root /opt; do
-    [ -d "$root" ] || continue
-    while IFS= read -r cfg; do
-      grep -ql -- "$pbase" "$cfg" 2>/dev/null && dirname "$cfg"
-    done < <(find "$root" -name pyvenv.cfg -readable 2>/dev/null)
-  done
-}
-
 cmd_python() {
   local action="${1:-}"; shift || true
-  local ver="" yes=0 check=0
+  local ver=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      -y|--yes) yes=1; shift ;;
-      --check)  check=1; shift ;;
-      *)        ver="$1"; shift ;;
+      -*)       die "未知参数: $1" ;;
+      *)
+        [ -z "$ver" ] || die "只能指定一个 Python 版本"
+        ver="$1"; shift
+        ;;
     esac
   done
   case "$action" in
@@ -256,28 +259,18 @@ cmd_python() {
       [ -n "$ver" ] || die "用法: muv python add <ver>"
       log "安装共享 Python $ver 到 $UV_ROOT/python"
       uv_env "$UV_ROOT/bin/uv" python install "$ver"
-      log "完成。所有 source 了 env.sh 的用户均可使用"
+      log "Python $ver 已安装到共享目录；已加载 env.sh 的用户可使用该版本"
       ;;
     rm|remove|uninstall)
       require_admin
-      [ -n "$ver" ] || die "用法: muv python rm <ver> [-y]"
-      local pbin pbase
+      [ -n "$ver" ] || die "用法: muv python rm <ver>"
+      local pbin
       pbin="$(uv_env "$UV_ROOT/bin/uv" python find "$ver" 2>/dev/null || true)"
       [ -n "$pbin" ] || die "未找到已安装的共享 Python $ver"
-      pbase="${pbin%/bin/*}"
-      # --check：按需做 best-effort 全盘扫描列出依赖的 venv（symlink/路径无反向索引，只能扫）
-      if [ "$check" -eq 1 ]; then
-        log "扫描仍依赖 $pbase 的 venv（/home /root /opt，可能较慢）…"
-        local refs; refs="$(venvs_using "$pbase")"
-        [ -n "$refs" ] && { warn "以下 venv 指向该版本，删除后会失效："; printf '  %s\n' $refs >&2; } \
-                       || log "未发现依赖它的 venv"
-      fi
-      warn "删除后所有基于 Python $ver 的 venv 会失效（python 变悬空链接）；muv python add $ver 装回同一路径即可自愈"
-      if [ "$yes" -ne 1 ]; then
-        printf '确认删除 Python %s？[y/N] ' "$ver" >&2
-        read -r ans 2>/dev/null || ans=""
-        case "$ans" in y|Y|yes|YES) ;; *) die "已取消" ;; esac
-      fi
+      warn "删除后，基于 Python $ver 的 venv 可能因解释器路径缺失而无法运行；重新执行 muv python add $ver 可恢复同一路径"
+      printf '确认删除 Python %s？[y/N] ' "$ver" >&2
+      read -r ans 2>/dev/null || ans=""
+      case "$ans" in y|Y|yes|YES) ;; *) die "已取消" ;; esac
       uv_env "$UV_ROOT/bin/uv" python uninstall "$ver"
       log "已删除共享 Python $ver"
       ;;
@@ -289,21 +282,21 @@ cmd_python() {
 }
 
 cmd_doctor() {
-  log "自检 $UV_ROOT"
+  log "检查 $UV_ROOT"
   local ok=1
-  getent group "$UV_GROUP" >/dev/null && echo "  组 $UV_GROUP: ✅" \
-    || { echo "  组 $UV_GROUP: ❌ 缺失"; ok=0; }
-  [ -x "$UV_ROOT/bin/uv" ] && echo "  uv: ✅ $("$UV_ROOT/bin/uv" --version 2>/dev/null)" \
-    || { echo "  uv: ❌"; ok=0; }
+  getent group "$UV_GROUP" >/dev/null && echo "  组 $UV_GROUP: 正常" \
+    || { echo "  组 $UV_GROUP: 缺失"; ok=0; }
+  [ -x "$UV_ROOT/bin/uv" ] && echo "  uv: 正常 $("$UV_ROOT/bin/uv" --version 2>/dev/null)" \
+    || { echo "  uv: 缺失"; ok=0; }
   if command -v getfacl >/dev/null 2>&1; then
     getfacl -p "$UV_ROOT/cache" 2>/dev/null | grep -q '^default:other::rwx' \
-      && echo "  cache default ACL(other=rwx): ✅" \
-      || { echo "  cache default ACL(other): ❌ 普通用户可能无法写缓存"; ok=0; }
-  else warn "  未装 getfacl，跳过 ACL 检查"; fi
+      && echo "  cache default ACL(other=rwx): 正常" \
+      || { echo "  cache default ACL(other=rwx): 缺失"; ok=0; }
+  else warn "未找到 getfacl，未检查 ACL"; fi
   grep -q '^export UV_DEFAULT_INDEX=' "$ENV_FILE" 2>/dev/null \
     && echo "  镜像源: $(sed -n -E 's/.*UV_DEFAULT_INDEX:-([^}]*)\}.*/\1/p' "$ENV_FILE")" \
     || echo "  镜像源: 未配置"
-  [ "$ok" -eq 1 ] && log "检查通过 ✅" || { warn "存在问题，见上"; return 1; }
+  [ "$ok" -eq 1 ] && log "检查通过" || { warn "检查未通过"; return 1; }
 }
 
 cmd_help() { awk 'NR>1 && /^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"; }
@@ -313,12 +306,12 @@ ORIG_ARGS=("$@")
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   install)           cmd_init "$@" ;;
-  set-index)         cmd_set_index "$@" ;;
-  add-admin)         cmd_add_admin "$@" ;;
-  rm-admin)          cmd_rm_admin "$@" ;;
+  mirror)            cmd_set_index "$@" ;;
+  grant)             cmd_grant "$@" ;;
+  revoke)            cmd_revoke "$@" ;;
   update)            cmd_update "$@" ;;
   python)            cmd_python "$@" ;;
-  doctor|check)      cmd_doctor "$@" ;;
+  doctor)            cmd_doctor "$@" ;;
   help|-h|--help)    cmd_help ;;
   *)                 die "未知命令: $cmd（muv help 查看用法）" ;;
 esac

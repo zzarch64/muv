@@ -1,0 +1,11 @@
+# 运行时数据（由 `muv install` 生成）
+/cache/
+/python/
+/python-cache/
+/tools/
+
+# uv 二进制与 bin/ 下生成的文件（uv/uvx 由 astral 发布，安装前放入 bin/）
+/bin/
+
+# env.sh 在安装时会被就地修改（写入镜像源/前缀）；仓库只跟踪模板
+# 如需保持模板纯净，可在安装到独立前缀后再提交

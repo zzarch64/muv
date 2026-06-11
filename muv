@@ -10,6 +10,11 @@
 #   muv add-admin <user>...      把用户加入 uvusers 管理员组
 #   muv rm-admin  <user>...      把用户移出 uvusers 管理员组
 #   muv update                   从官网下载最新 uv 并替换共享二进制
+#   muv python add <ver>         安装共享 Python（uvusers 成员）
+#   muv python rm  <ver> [-y] [--check]
+#                                删除共享 Python（uvusers）；--check 才全盘扫描依赖的 venv
+#   muv python list              列出已安装的共享 Python
+#   (普通用户不能安装/删除共享 Python，只能使用管理员预置的版本)
 #   muv doctor                   自检：组 / 权限 / ACL / 二进制
 #   muv help                     显示本帮助
 #
@@ -47,7 +52,8 @@ uv_env() {
   PATH="$UV_ROOT/bin:$PATH" \
   UV_CACHE_DIR="$UV_ROOT/cache" UV_PYTHON_INSTALL_DIR="$UV_ROOT/python" \
   UV_PYTHON_CACHE_DIR="$UV_ROOT/python-cache" UV_MANAGED_PYTHON=true \
-  UV_PYTHON_BIN_DIR="$UV_ROOT/bin" UV_LINK_MODE=hardlink "$@"
+  UV_PYTHON_BIN_DIR="$UV_ROOT/bin" UV_LINK_MODE=hardlink \
+  UV_PYTHON_DOWNLOADS=manual "$@"
 }
 
 # 用 cnpip 测速取最快镜像 URL（输出到 stdout，失败返回非 0）
@@ -126,17 +132,17 @@ cmd_init() {
 
   log "创建目录 + 权限"
   mkdir -p "$UV_ROOT"/{bin,cache,python,python-cache,tools}
-  for d in "$UV_ROOT" "$UV_ROOT/bin" "$UV_ROOT/tools"; do
+  # 仅管理员可写：bin/tools/python/python-cache（Python 版本由管理员集中管理）
+  for d in "$UV_ROOT" "$UV_ROOT"/{bin,tools,python,python-cache}; do
     chown root:"$UV_GROUP" "$d"; chmod 2775 "$d"; done
+  # 缓存所有用户可读写（可重建）
   chown root:"$UV_GROUP" "$UV_ROOT/cache"; chmod 2777 "$UV_ROOT/cache"
-  for d in "$UV_ROOT/python" "$UV_ROOT/python-cache"; do
-    chown root:"$UV_GROUP" "$d"; chmod 3777 "$d"; done
 
   log "设置 default ACL"
   for d in "$UV_ROOT" "$UV_ROOT"/{bin,cache,python,python-cache,tools}; do
     setfacl -d -m g:"$UV_GROUP":rwx "$d"; done
-  for d in "$UV_ROOT"/{cache,python,python-cache}; do
-    setfacl -d -m o:rwx "$d"; chmod -R o+rw "$d" 2>/dev/null || true; done
+  # 仅 cache 对 others 开放写
+  setfacl -d -m o:rwx "$UV_ROOT/cache"; chmod -R o+rw "$UV_ROOT/cache" 2>/dev/null || true
 
   log "部署 uv / uvx / pip / env.sh / muv"
   install -m 0775 -o root -g "$UV_GROUP" "$uv_src"  "$UV_ROOT/bin/uv"
@@ -223,6 +229,65 @@ cmd_update() {
   log "uv 已更新: $old -> $new"
 }
 
+# 扫描各用户 venv 的 pyvenv.cfg，找出仍指向某解释器目录的 venv（best-effort）
+venvs_using() {
+  local pbase="$1" cfg
+  for root in /home /root /opt; do
+    [ -d "$root" ] || continue
+    while IFS= read -r cfg; do
+      grep -ql -- "$pbase" "$cfg" 2>/dev/null && dirname "$cfg"
+    done < <(find "$root" -name pyvenv.cfg -readable 2>/dev/null)
+  done
+}
+
+cmd_python() {
+  local action="${1:-}"; shift || true
+  local ver="" yes=0 check=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -y|--yes) yes=1; shift ;;
+      --check)  check=1; shift ;;
+      *)        ver="$1"; shift ;;
+    esac
+  done
+  case "$action" in
+    add)
+      require_admin
+      [ -n "$ver" ] || die "用法: muv python add <ver>"
+      log "安装共享 Python $ver 到 $UV_ROOT/python"
+      uv_env "$UV_ROOT/bin/uv" python install "$ver"
+      log "完成。所有 source 了 env.sh 的用户均可使用"
+      ;;
+    rm|remove|uninstall)
+      require_admin
+      [ -n "$ver" ] || die "用法: muv python rm <ver> [-y]"
+      local pbin pbase
+      pbin="$(uv_env "$UV_ROOT/bin/uv" python find "$ver" 2>/dev/null || true)"
+      [ -n "$pbin" ] || die "未找到已安装的共享 Python $ver"
+      pbase="${pbin%/bin/*}"
+      # --check：按需做 best-effort 全盘扫描列出依赖的 venv（symlink/路径无反向索引，只能扫）
+      if [ "$check" -eq 1 ]; then
+        log "扫描仍依赖 $pbase 的 venv（/home /root /opt，可能较慢）…"
+        local refs; refs="$(venvs_using "$pbase")"
+        [ -n "$refs" ] && { warn "以下 venv 指向该版本，删除后会失效："; printf '  %s\n' $refs >&2; } \
+                       || log "未发现依赖它的 venv"
+      fi
+      warn "删除后所有基于 Python $ver 的 venv 会失效（python 变悬空链接）；muv python add $ver 装回同一路径即可自愈"
+      if [ "$yes" -ne 1 ]; then
+        printf '确认删除 Python %s？[y/N] ' "$ver" >&2
+        read -r ans 2>/dev/null || ans=""
+        case "$ans" in y|Y|yes|YES) ;; *) die "已取消" ;; esac
+      fi
+      uv_env "$UV_ROOT/bin/uv" python uninstall "$ver"
+      log "已删除共享 Python $ver"
+      ;;
+    list|"")
+      uv_env "$UV_ROOT/bin/uv" python list --only-installed
+      ;;
+    *) die "用法: muv python {add|rm|list} [ver]" ;;
+  esac
+}
+
 cmd_doctor() {
   log "自检 $UV_ROOT"
   local ok=1
@@ -252,6 +317,7 @@ case "$cmd" in
   add-admin)         cmd_add_admin "$@" ;;
   rm-admin)          cmd_rm_admin "$@" ;;
   update)            cmd_update "$@" ;;
+  python)            cmd_python "$@" ;;
   doctor|check)      cmd_doctor "$@" ;;
   help|-h|--help)    cmd_help ;;
   *)                 die "未知命令: $cmd（muv help 查看用法）" ;;

@@ -10,10 +10,12 @@ export UV_CACHE_DIR=${UV_ROOT}/cache
 # 镜像源：下方默认值由 install.sh 用 cnpip 测速后替换；用户可在 source 前预设覆盖
 export UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX:-https://mirrors.aliyun.com/pypi/simple/}
 
-# uv-managed Python 共享存储（所有人可安装新版本，sticky bit 保护已有版本）
+# uv-managed Python 共享存储（仅管理员可写，版本集中管理）
 export UV_PYTHON_INSTALL_DIR=${UV_ROOT}/python
 export UV_PYTHON_CACHE_DIR=${UV_ROOT}/python-cache
 export UV_MANAGED_PYTHON=true
+# 普通用户禁止下载/安装 Python，只能使用管理员预置的版本（下方管理员段会放开）
+export UV_PYTHON_DOWNLOADS=never
 
 # 避免重复追加 PATH
 case ":$PATH:" in
@@ -28,6 +30,9 @@ fi
 
 # Python symlink 写入共享 bin（仅管理员）
 export UV_PYTHON_BIN_DIR=${UV_ROOT}/bin
+
+# 管理员可显式安装 Python（manual：允许 uv python install，但不自动下载）
+export UV_PYTHON_DOWNLOADS=manual
 
 # uv tool 共享存储（仅管理员）
 export UV_TOOL_DIR=${UV_ROOT}/tools

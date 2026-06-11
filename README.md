@@ -19,7 +19,7 @@
   sudo apt install acl     # Debian/Ubuntu
   sudo yum install acl     # RHEL/CentOS
   ```
-- 仓库内需带 uv 二进制:`bin/uv`、`bin/uvx`
+- `curl` 或 `wget`(安装时若 `bin/` 没有 uv,会从官网自动下载)
 
 ## 安装
 
@@ -32,7 +32,7 @@ sudo ./muv install --index <url>        # 指定镜像源,跳过测速
 sudo ./muv install --python 3.12        # 指定默认 Python 版本
 ```
 
-安装会:建 `uvusers` 组 → 建目录并设权限/ACL → 部署 `uv`/`uvx`/`pip`/`env.sh`/`muv` → 写入镜像源 → 装默认 Python → 自检。完成后 `muv` 位于 `$PREFIX/bin/muv`,进入共享 `PATH`。
+安装会:建 `uvusers` 组 → 建目录并设权限/ACL → 部署 `uv`/`uvx`/`pip`/`env.sh`/`muv`(`bin/` 没有 uv 时从 `astral.sh` 自动下载)→ 写入镜像源 → 装默认 Python → 自检。完成后 `muv` 位于 `$PREFIX/bin/muv`,进入共享 `PATH`。
 
 ## 快速开始
 
@@ -63,7 +63,7 @@ uv pip install requests       # 命中共享缓存
 | `muv add-admin <user>...` | 把用户加入 `uvusers` 组 | root(自动 sudo) |
 | `muv rm-admin <user>...` | 把用户移出 `uvusers` 组 | root(自动 sudo) |
 | `muv set-index [<url>]` | 替换镜像源;不带 url 用 cnpip 测速自动选最快 | uvusers 成员 |
-| `muv update <新uv目录\|uv二进制>` | 替换共享 uv/uvx 二进制 | uvusers 成员 |
+| `muv update` | 从官网下载最新 uv 并替换共享二进制 | uvusers 成员 |
 | `muv doctor` | 自检:组 / 权限 / ACL / 二进制 / 当前源 | 任何人 |
 | `muv help` | 显示帮助 | 任何人 |
 
@@ -123,7 +123,7 @@ $PREFIX/                   # 默认 /opt/uv
 
 - **磁盘** —— 用户可持续往 `python/` 装版本、缓存也持续增长,无自动清理。定期看 `df`,必要时由管理员 `source env.sh` 后 `uv cache prune`(清陈旧条目)或低峰期 `uv cache clean`(整体清空,可重新下载恢复)。换源只留下少量索引元数据,不影响占大头的解包内容。
 - **组成员变更** —— 加入/移除 `uvusers` 组后需重新登录生效。
-- **升级 uv** —— `muv update <新uv二进制>`,会打印 old → new 版本。
+- **升级 uv** —— `muv update`,从官网拉最新版并打印 old → new 版本。
 
 ## 许可证
 

@@ -9,7 +9,7 @@
 #   muv set-index [<url>]        替换镜像源；不带 url 则用 cnpip 测速自动选最快
 #   muv add-admin <user>...      把用户加入 uvusers 管理员组
 #   muv rm-admin  <user>...      把用户移出 uvusers 管理员组
-#   muv update <新uv目录|uv二进制>  替换共享 uv/uvx 二进制
+#   muv update                   从官网下载最新 uv 并替换共享二进制
 #   muv doctor                   自检：组 / 权限 / ACL / 二进制
 #   muv help                     显示本帮助
 #
@@ -69,6 +69,21 @@ write_index() {
   log "镜像源已写入 env.sh: $url"
 }
 
+# 用官方脚本把 uv/uvx 下载到指定目录（不改 PATH/profile）
+bootstrap_uv() {
+  local dest="$1"
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
+    || die "需要 curl 或 wget 下载 uv，或手动把 uv/uvx 放入 bin/ 后重试"
+  log "未找到 uv 二进制，从 astral.sh 下载到 $dest …"
+  mkdir -p "$dest"
+  local fetch
+  if command -v curl >/dev/null 2>&1; then fetch="curl -LsSf https://astral.sh/uv/install.sh"
+  else fetch="wget -qO- https://astral.sh/uv/install.sh"; fi
+  $fetch | env UV_INSTALL_DIR="$dest" UV_NO_MODIFY_PATH=1 INSTALLER_NO_MODIFY_PATH=1 sh \
+    || die "uv 下载/安装失败"
+  [ -x "$dest/uv" ] && [ -x "$dest/uvx" ] || die "下载后仍未找到 $dest/uv（或 uvx）"
+}
+
 # ---------------- 子命令 ----------------
 
 cmd_init() {
@@ -92,7 +107,12 @@ cmd_init() {
   for base in "$src_dir/bin" "$src_dir" "$UV_ROOT/bin"; do
     if [ -x "$base/uv" ] && [ -x "$base/uvx" ]; then uv_src="$base/uv"; uvx_src="$base/uvx"; break; fi
   done
-  [ -n "${uv_src:-}" ] || die "找不到 uv/uvx 二进制（找过 $src_dir/bin、$src_dir、$UV_ROOT/bin）"
+  if [ -z "${uv_src:-}" ]; then
+    # 仓库未自带二进制时，自动用官方脚本下载到临时目录
+    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+    bootstrap_uv "$tmp"
+    uv_src="$tmp/uv"; uvx_src="$tmp/uvx"
+  fi
 
   # hardlink 跨分区提示
   local rfs hfs
@@ -192,17 +212,13 @@ cmd_rm_admin() {
 
 cmd_update() {
   require_admin
-  local src="${1:-}"
-  [ -n "$src" ] || die "用法: muv update <新uv目录|uv二进制>"
-  local uv_src uvx_src
-  if [ -d "$src" ]; then uv_src="$src/uv"; uvx_src="$src/uvx"
-  else uv_src="$src"; uvx_src="$(dirname "$src")/uvx"; fi
-  [ -x "$uv_src" ]  || die "找不到可执行的 uv: $uv_src"
-  [ -x "$uvx_src" ] || die "找不到可执行的 uvx: $uvx_src"
+  # 始终从官网下载最新版到临时目录
+  local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+  bootstrap_uv "$tmp"
   local old new
   old="$("$UV_ROOT/bin/uv" --version 2>/dev/null || echo 'none')"
-  install -m 0775 -g "$UV_GROUP" "$uv_src"  "$UV_ROOT/bin/uv"
-  install -m 0775 -g "$UV_GROUP" "$uvx_src" "$UV_ROOT/bin/uvx"
+  install -m 0775 -g "$UV_GROUP" "$tmp/uv"  "$UV_ROOT/bin/uv"
+  install -m 0775 -g "$UV_GROUP" "$tmp/uvx" "$UV_ROOT/bin/uvx"
   new="$("$UV_ROOT/bin/uv" --version 2>/dev/null || echo '?')"
   log "uv 已更新: $old -> $new"
 }

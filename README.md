@@ -28,7 +28,7 @@
 sudo ./install.sh                       # 装到默认 /opt/uv,并测速选镜像
 sudo ./install.sh --prefix /srv/uv      # 自定义安装前缀
 sudo ./install.sh --index <url>         # 指定镜像源,不执行镜像测速
-sudo ./install.sh --python 3.12         # 指定默认 Python 版本
+sudo ./install.sh --python 3.11         # 指定默认 Python 版本(不传默认 3.12)
 ```
 
 源码目录中的 `install.sh` 是安装器,只负责安装/修复共享环境。源码目录中的 `muv` 是管理命令模板,安装时会被部署为 `$PREFIX/bin/muv`;后续镜像、升级、Python 管理等操作都通过安装后的 `muv` 执行,避免回写源码目录。
@@ -37,7 +37,7 @@ sudo ./install.sh --python 3.12         # 指定默认 Python 版本
 
 1. 创建 `uvusers` 组。
 2. 创建共享目录并设置权限/ACL。
-3. 部署 `uv`/`uvx`/`pip`/`env.sh`/`muv`。若源码 `bin/` 中没有 `uv`/`uvx`,安装器会从 `astral.sh` 下载。
+3. 部署 `uv`/`uvx`/`pip`/`env.sh`/`lib/muv.sh`/`muv`。若源码 `bin/` 中没有 `uv`/`uvx`,安装器会从 `astral.sh` 下载。
 4. 写入 `$PREFIX/muv.env`,保存管理员组、默认镜像源等机器配置。
 5. 安装默认 Python 并执行自检。
 
@@ -66,16 +66,17 @@ uv pip install requests       # 命中共享缓存
 
 | 命令 | 作用 | 权限 |
 |------|------|------|
-| `install.sh [--prefix d] [--group g] [--index url\|--no-mirror] [--python X.Y]` | 安装/修复共享环境 | root |
+| `install.sh [--prefix d] [--group g] [--index url\|--no-mirror] [--python X.Y]` | 安装/修复共享环境;`--python` 默认 `3.12` | root |
 | `muv grant <user>...` | 把用户加入 `uvusers` 组 | root |
 | `muv revoke <user>...` | 把用户移出 `uvusers` 组 | root |
 | `muv mirror [<url>]` | 替换镜像源;不带 url 用 cnpip 测速自动选最快 | uvusers 成员 |
 | `muv update` | 从官网下载最新 uv 并替换共享二进制 | uvusers 成员 |
 | `muv python add <ver>` | 安装共享 Python | uvusers 成员 |
-| `muv python rm <ver>` | 删除共享 Python(删除前显示风险提示并要求确认) | uvusers 成员 |
+| `muv python rm [--yes] <ver>` | 删除共享 Python(默认从终端确认;脚本化需显式 `--yes`) | uvusers 成员 |
 | `muv python list` | 列出已安装的共享 Python | 任何人 |
 | `muv doctor` | 自检:组 / 权限 / ACL / 二进制 / 当前源 | 任何人 |
 | `muv help` | 显示帮助 | 任何人 |
+| `muv --version` | 显示 muv 版本 | 任何人 |
 
 ## 工作原理
 
@@ -86,7 +87,8 @@ $PREFIX/                   # 默认 /opt/uv
 ├── env.sh                 # 用户 source 的环境脚本模板(664 root:uvusers)
 ├── muv.env                # 机器相关运行配置(664 root:uvusers)
 ├── bin/                   # 2775 root:uvusers — uv/uvx/pip/muv + Python symlink
-├── cache/                 # 2777 uvusers:uvusers — 共享缓存(所有用户可写)
+├── lib/                   # 2775 root:uvusers — muv 私有库(非用户命令)
+├── cache/                 # 3777 root:uvusers — 共享缓存(所有用户可写,sticky 防互删)
 ├── python/                # 2775 root:uvusers — 共享 Python(仅管理员可装/删)
 ├── python-cache/          # 2775 root:uvusers — Python 下载缓存(仅管理员可写)
 └── tools/                 # 2775 root:uvusers — 共享工具(仅管理员可写)
@@ -94,8 +96,8 @@ $PREFIX/                   # 默认 /opt/uv
 
 ### 权限模型
 
-- **Python 集中管理** —— `python/`、`python-cache/` 为 `2775 root:uvusers`,只有管理员能装/删 Python;普通用户 `env.sh` 里 `UV_PYTHON_DOWNLOADS=never`,只能使用预置版本,需要新版本时找管理员 `muv python add`。这样避免版本在各用户家目录里分散。`cache/` 则对所有用户可写,便于任意用户清理可重建的缓存。
-- **default ACL** —— 共享目录用目录级 default ACL 保证新建文件对组(及 `cache` 的 others)可写,`env.sh` 不改用户 umask。
+- **Python 集中管理** —— `python/`、`python-cache/` 为 `2775 root:uvusers`,只有管理员能装/删 Python;普通用户 `env.sh` 里 `UV_PYTHON_DOWNLOADS=never`,只能使用预置版本,需要新版本时找管理员 `muv python add`。这样避免版本在各用户家目录里分散。`cache/` 则对所有用户可写,共享可重建的缓存。
+- **default ACL + sticky cache** —— 共享目录用目录级 default ACL 保证新建文件对组(及 `cache` 的 others)可写,`env.sh` 不改用户 umask。`cache/` 使用 sticky bit,普通用户不能删除其他用户拥有的缓存目录项。
 - **保护 uv/muv** —— `bin/` 为 `2775 root:uvusers` 且 ACL `other::r-x`:非 uvusers 用户既无法改 `bin/uv` / `bin/muv` 内容,也无法在 `bin/` 内替换它们,从文件系统层强制"只有 uv 管理员能管 uv"。`muv` 的成员校验只是更友好的报错,不是唯一防线。
 - **hardlink** —— `UV_LINK_MODE=hardlink` 让多用户 venv 共享缓存数据块,要求缓存与用户 home 在同一文件系统分区,跨分区自动 fallback 到 copy(`install.sh` 会提示)。
 
@@ -119,7 +121,7 @@ $PREFIX/                   # 默认 /opt/uv
 
 | 操作 | 管理员 | 普通用户 |
 |------|--------|----------|
-| 运行 `uv`/`uvx`、使用共享缓存与镜像源 | ✅ | ✅ |
+| 运行 `uv`/`uvx`、写入共享缓存与使用镜像源 | ✅ | ✅ |
 | 使用已安装的 Python | ✅ | ✅ |
 | 安装 Python 到共享目录 | ✅ | ❌ |
 | 删除共享 Python | ✅ | ❌ |

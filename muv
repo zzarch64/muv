@@ -1,48 +1,71 @@
 #!/usr/bin/env bash
 #
-# muv - 已安装共享 uv 环境管理命令
+# muv - 共享 uv 环境管理器
 #
 # 用法:
 #   muv <command> [options]
 #   muv help
 #
 # 命令:
-#   mirror [url]                   配置镜像源。未提供 url 时自动选择。
-#   grant <user>...                授权用户管理权限。
-#   revoke <user>...               撤销用户管理权限。
-#   update                         下载并替换 uv 与 uvx。
-#   python add <version>           安装共享托管 Python 版本。
-#   python rm [--yes] <version>    删除共享托管 Python 版本。
+#   install [options]               安装/修复共享环境。
+#     --prefix <dir>                安装前缀。默认: /opt/uv。
+#     --group <name>                管理员组。默认: uvusers。
+#     --index <url>                 配置默认包索引地址。
+#     --no-mirror                   不执行镜像自动选择。
+#     --python <version>            安装默认托管 Python 版本。默认: 3.12。
+#   mirror [url]                    配置镜像源。未提供 url 时自动选择。
+#   grant <user>...                 授权用户管理权限。
+#   revoke <user>...                撤销用户管理权限。
+#   update                          下载并替换 uv 与 uvx。
+#   python add <version>            安装共享托管 Python 版本。
+#   python rm [--yes] <version>     删除共享托管 Python 版本。
 #                                  删除前显示风险提示并要求确认。
-#   python list                    列出已安装的共享 Python 版本。
-#   doctor                         检查组、权限、ACL、二进制与索引状态。
-#   help                           显示帮助信息。
-#   --version                      显示 muv 版本。
-#
-# 安装:
-#   源码目录中的 install.sh 负责安装/修复共享环境，并把本文件部署为
-#   $PREFIX/bin/muv。
+#   python list                     列出已安装的共享 Python 版本。
+#   doctor                          检查组、权限、ACL、二进制与索引状态。
+#   help                            显示帮助信息。
+#   --version                       显示 muv 版本。
 #
 set -euo pipefail
 
-# ===== 配置 =====
+# ===== 常量 =====
 
-default_uv_root() {
-  local self dir parent
-  self="$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")"
-  dir="$(cd "$(dirname "$self")" && pwd -P)"
-  if [ "$(basename "$dir")" = "bin" ]; then
-    parent="$(cd "$dir/.." && pwd -P)"
-    [ -f "$parent/env.sh" ] && [ -f "$parent/muv.env" ] && { printf '%s\n' "$parent"; return 0; }
-  fi
-  printf '%s\n' "/opt/uv"
-}
+MUV_VERSION="0.1.0"
+MUV_LOG_NAME="${MUV_LOG_NAME:-muv}"
+
+# ===== 上下文检测 =====
+
+# 始终计算脚本所在目录（不受 UV_ROOT 预设影响）。
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")"
+MUV_SELF_DIR="$(cd "$(dirname "$_self")" && pwd -P)"
+MUV_RUNTIME_SRC="$_self"
+
+# 模板目录：env.sh / muv 所在的目录。
+# 源码模式下 MUV_SELF_DIR 就是源码根目录（muv 和 env.sh 同级）；
+# 已安装模式下 MUV_SELF_DIR 是 $PREFIX/bin，模板在 $PREFIX。
+if [ "$(basename "$MUV_SELF_DIR")" = "bin" ] && [ -f "$MUV_SELF_DIR/../env.sh" ]; then
+  MUV_TEMPLATE_DIR="$(cd "$MUV_SELF_DIR/.." && pwd -P)"
+else
+  MUV_TEMPLATE_DIR="$MUV_SELF_DIR"
+fi
 
 MUV_EXPLICIT_UV_ROOT=0
 if [ -n "${UV_ROOT+x}" ]; then
   MUV_EXPLICIT_UV_ROOT=1
+  MUV_RUNNING_MODE="installed"
 else
-  UV_ROOT="$(default_uv_root)"
+  if [ "$(basename "$MUV_SELF_DIR")" = "bin" ]; then
+    local_parent="$(cd "$MUV_SELF_DIR/.." && pwd -P)"
+    if [ -f "$local_parent/env.sh" ] && [ -f "$local_parent/muv.env" ]; then
+      MUV_RUNNING_MODE="installed"
+      UV_ROOT="$local_parent"
+    else
+      MUV_RUNNING_MODE="source"
+      UV_ROOT="/opt/uv"
+    fi
+  else
+    MUV_RUNNING_MODE="source"
+    UV_ROOT="/opt/uv"
+  fi
 fi
 UV_GROUP="${UV_GROUP:-uvusers}"
 ENV_FILE="$UV_ROOT/env.sh"
@@ -50,35 +73,148 @@ CONFIG_FILE="$UV_ROOT/muv.env"
 
 # ===== 工具函数 =====
 
-source_muv_lib() {
-  local self dir parent
-  self="$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")"
-  dir="$(cd "$(dirname "$self")" && pwd -P)"
-  parent="$(cd "$dir/.." && pwd -P)"
-  MUV_LOG_NAME=muv
-  if [ "$(basename "$dir")" = "bin" ] && [ -r "$parent/lib/muv.sh" ]; then
-    . "$parent/lib/muv.sh"
-  elif [ -r "$dir/lib/muv.sh" ]; then
-    . "$dir/lib/muv.sh"
+log()  { printf '\033[1;32m[%s]\033[0m %s\n' "$MUV_LOG_NAME" "$*"; }
+warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+run_uv() {
+  PATH="$UV_ROOT/bin:$PATH" \
+  UV_CACHE_DIR="$UV_ROOT/cache" UV_PYTHON_INSTALL_DIR="$UV_ROOT/python" \
+  UV_PYTHON_CACHE_DIR="$UV_ROOT/python-cache" UV_MANAGED_PYTHON=true \
+  UV_PYTHON_BIN_DIR="$UV_ROOT/bin" UV_LINK_MODE=hardlink \
+  UV_PYTHON_DOWNLOADS=manual "$UV_ROOT/bin/uv" "$@"
+}
+
+pick_fastest_index() {
+  local out url
+  out="$(PATH="$UV_ROOT/bin:$PATH" \
+         UV_CACHE_DIR="$UV_ROOT/cache" UV_PYTHON_INSTALL_DIR="$UV_ROOT/python" \
+         UV_PYTHON_CACHE_DIR="$UV_ROOT/python-cache" UV_MANAGED_PYTHON=true \
+         UV_PYTHON_BIN_DIR="$UV_ROOT/bin" UV_LINK_MODE=hardlink \
+         UV_PYTHON_DOWNLOADS=manual \
+         "$UV_ROOT/bin/uvx" cnpip list 2>/dev/null)" || return 1
+  url="$(printf '%s\n' "$out" \
+    | awk '/ms/ && /https?:\/\// {for(i=1;i<=NF;i++) if($i ~ /^https?:\/\//){print $i; exit}}')"
+  [ -n "$url" ] && { printf '%s\n' "$url"; return 0; } || return 1
+}
+
+read_config_var() {
+  local name="$1" line value="" found=0 single_quoted_re
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 2
+  [ -f "$CONFIG_FILE" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$name="*) value="${line#*=}"; found=1 ;;
+    esac
+  done < "$CONFIG_FILE"
+  [ "$found" -eq 1 ] || return 1
+
+  single_quoted_re="^'([^']*)'$"
+  if [[ "$value" =~ $single_quoted_re ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$value" =~ ^[A-Za-z0-9_./:@%+=,~-]*$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  return 1
+}
+
+write_runtime_config() {
+  local index_url="${1:-}" existing_index tmp
+  [ -d "$UV_ROOT" ] || die "未找到 $UV_ROOT，请先执行 muv install"
+  if [ -z "$index_url" ]; then
+    existing_index="$(read_config_var MUV_DEFAULT_INDEX 2>/dev/null || true)"
+    index_url="$existing_index"
+  fi
+  tmp="$CONFIG_FILE.tmp.$$"
+  {
+    printf '# Generated by muv. Do not commit machine-specific values.\n'
+    printf 'MUV_GROUP=%s\n' "$(shell_quote "$UV_GROUP")"
+    if [ -n "$index_url" ]; then
+      printf 'MUV_DEFAULT_INDEX=%s\n' "$(shell_quote "$index_url")"
+    fi
+  } > "$tmp" || die "写入失败: $tmp"
+  mv "$tmp" "$CONFIG_FILE" || die "写入失败: $CONFIG_FILE"
+  chown root:"$UV_GROUP" "$CONFIG_FILE" 2>/dev/null || true
+  chmod 0664 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+write_index() {
+  local url="$1"
+  [ -f "$ENV_FILE" ] || die "未找到 $ENV_FILE，请先执行 muv install"
+  write_runtime_config "$url"
+  [ "$(read_config_var MUV_DEFAULT_INDEX 2>/dev/null || true)" = "$url" ] \
+    || die "写入失败，请检查 $CONFIG_FILE"
+  log "镜像源已写入 $CONFIG_FILE: $url"
+}
+
+bootstrap_uv() {
+  local dest="$1"
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
+    || die "需要 curl 或 wget 下载 uv，或手动把 uv/uvx 放入 bin/ 后重试"
+  log "未找到 uv 二进制，从 astral.sh 下载到 $dest"
+  mkdir -p "$dest"
+  local -a fetch_cmd
+  if command -v curl >/dev/null 2>&1; then
+    fetch_cmd=(curl -LsSf https://astral.sh/uv/install.sh)
   else
-    printf '\033[1;31m[error]\033[0m 缺少共享库 lib/muv.sh；请重新执行 install.sh\n' >&2
-    exit 1
+    fetch_cmd=(wget -qO- https://astral.sh/uv/install.sh)
   fi
+  "${fetch_cmd[@]}" | env UV_INSTALL_DIR="$dest" UV_NO_MODIFY_PATH=1 INSTALLER_NO_MODIFY_PATH=1 sh \
+    || die "uv 下载/安装失败"
+  [ -x "$dest/uv" ] && [ -x "$dest/uvx" ] || die "下载后仍未找到 $dest/uv（或 uvx）"
 }
 
-source_muv_lib
-
-ensure_runtime_context() {
-  local self dir parent
-  [ "$MUV_EXPLICIT_UV_ROOT" -eq 1 ] && return 0
-  self="$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")"
-  dir="$(cd "$(dirname "$self")" && pwd -P)"
-  if [ "$(basename "$dir")" = "bin" ]; then
-    parent="$(cd "$dir/.." && pwd -P)"
-    [ "$parent" = "$UV_ROOT" ] && [ -f "$parent/env.sh" ] && [ -f "$parent/muv.env" ] && return 0
+acquire_muv_lock() {
+  local lock_file="$UV_ROOT/.muv.lock"
+  exec 9>"$lock_file" || die "无法创建锁文件: $lock_file"
+  if command -v flock >/dev/null 2>&1; then
+    flock -n 9 || die "另一个 muv 操作正在执行"
+  else
+    warn "未找到 flock，无法启用并发保护"
   fi
-  die "源码目录中的 muv 是安装后管理命令模板；请先执行 install.sh，然后使用 $UV_ROOT/bin/muv"
+  chown root:"$UV_GROUP" "$lock_file" 2>/dev/null || true
+  chmod 0664 "$lock_file" 2>/dev/null || true
 }
+
+# root 在 sticky 缓存目录里留下的普通文件，会被 Linux fs.protected_regular
+# 拦截（非 root 用户无法 open root 拥有的文件，即使权限位是 666）。
+# 此函数将 root 拥有的缓存文件转交给实际操作者（SUDO_USER 或 uvusers 成员）。
+# 仅在 root 身份下有效。
+fix_root_cache() {
+  [ "$(id -u)" -eq 0 ] || return 0
+  [ -d "$UV_ROOT/cache" ] || return 0
+
+  local target=""
+  # 优先用 SUDO_USER（谁跑的 sudo muv install）
+  [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" &>/dev/null && target="$SUDO_USER"
+  # 回退：取 uvusers 组的第一个成员
+  [ -z "$target" ] && target=$(getent group "$UV_GROUP" 2>/dev/null | cut -d: -f4 | cut -d, -f1)
+  [ -n "$target" ] || return 0
+
+  local count
+  count=$(find "$UV_ROOT/cache" -mindepth 1 -user root -type f -printf . 2>/dev/null | wc -c)
+  [ "$count" -gt 0 ] || return 0
+
+  find "$UV_ROOT/cache" -mindepth 1 -user root -type f \
+    -exec chown "$target:$UV_GROUP" {} + 2>/dev/null || true
+  log "已修复 $count 个 root 拥有的缓存文件 -> $target"
+}
+
+# 检查缓存中是否有 root 拥有的文件（doctor 用）。
+# 返回文件数（0 表示无问题）。
+check_root_cache() {
+  [ -d "$UV_ROOT/cache" ] || { printf '%s\n' "0"; return; }
+  find "$UV_ROOT/cache" -mindepth 1 -user root -type f -printf . 2>/dev/null | wc -c
+}
+
+# ===== 运行时函数 =====
 
 # root 或管理员组成员可执行组可写资源的管理命令。
 require_admin() {
@@ -91,7 +227,7 @@ require_admin() {
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     command -v sudo >/dev/null 2>&1 || die "需要 root 权限，且未找到 sudo"
-    exec sudo -E UV_ROOT="$UV_ROOT" UV_GROUP="$UV_GROUP" "$0" "${ORIG_ARGS[@]}"
+    exec sudo -E UV_ROOT="$UV_ROOT" UV_GROUP="$UV_GROUP" "$MUV_RUNTIME_SRC" "${ORIG_ARGS[@]}"
   fi
 }
 
@@ -99,14 +235,12 @@ need_root() {
 foreach_user() {
   local action="$1"; shift
   [ $# -gt 0 ] || die "用法: muv ${cmd} <user>..."
-  getent group "$UV_GROUP" >/dev/null || die "组 $UV_GROUP 不存在，请先执行 install.sh"
+  getent group "$UV_GROUP" >/dev/null || die "组 $UV_GROUP 不存在，请先执行 muv install"
   for u in "$@"; do
     id "$u" >/dev/null 2>&1 || { warn "用户 $u 不存在，已忽略"; continue; }
     "$action" "$u"
   done
 }
-
-# ===== 子命令 =====
 
 cmd_mirror() {
   require_admin
@@ -129,13 +263,15 @@ cmd_revoke() { need_root; foreach_user _do_revoke "$@"; }
 cmd_update() {
   require_admin
   acquire_muv_lock
-  local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+  local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   bootstrap_uv "$tmp"
   local old new
   old="$("$UV_ROOT/bin/uv" --version 2>/dev/null || echo 'none')"
   install -m 0775 -o root -g "$UV_GROUP" "$tmp/uv"  "$UV_ROOT/bin/uv"
   install -m 0775 -o root -g "$UV_GROUP" "$tmp/uvx" "$UV_ROOT/bin/uvx"
   new="$("$UV_ROOT/bin/uv" --version 2>/dev/null || echo '?')"
+  rm -rf "$tmp"
+  trap - EXIT
   log "uv 已更新: $old -> $new"
 }
 
@@ -194,8 +330,6 @@ cmd_doctor() {
     || { echo "  env.sh: 缺失"; ok=0; }
   [ -r "$CONFIG_FILE" ] && echo "  muv.env: OK" \
     || { echo "  muv.env: 缺失"; ok=0; }
-  [ -r "$UV_ROOT/lib/muv.sh" ] && echo "  lib/muv.sh: OK" \
-    || { echo "  lib/muv.sh: 缺失"; ok=0; }
   [ -x "$UV_ROOT/bin/uv" ] && echo "  uv: OK $("$UV_ROOT/bin/uv" --version 2>/dev/null)" \
     || { echo "  uv: 缺失"; ok=0; }
   if command -v getfacl >/dev/null 2>&1; then
@@ -223,22 +357,181 @@ cmd_doctor() {
   [ "$ok" -eq 1 ] && log "检查通过" || { warn "存在问题，见上"; return 1; }
 }
 
-cmd_help() { awk 'NR>1 && /^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"; }
 cmd_version() { printf 'muv %s\n' "$MUV_VERSION"; }
 
+# ===== 安装函数 =====
+
+cleanup_temp_dirs() {
+  [ "${#TEMP_DIRS[@]}" -eq 0 ] || rm -rf "${TEMP_DIRS[@]}"
+}
+
+set_uv_root() {
+  UV_ROOT="$1"
+  ENV_FILE="$UV_ROOT/env.sh"
+  CONFIG_FILE="$UV_ROOT/muv.env"
+}
+
+find_uv_binaries() {
+  local src_dir="$MUV_TEMPLATE_DIR"
+  uv_src="" uvx_src=""
+  for base in "$src_dir/bin" "$src_dir" "$UV_ROOT/bin"; do
+    if [ -x "$base/uv" ] && [ -x "$base/uvx" ]; then uv_src="$base/uv"; uvx_src="$base/uvx"; break; fi
+  done
+  if [ -z "$uv_src" ]; then
+    local tmp; tmp="$(mktemp -d)"; TEMP_DIRS+=("$tmp")
+    bootstrap_uv "$tmp"
+    uv_src="$tmp/uv"; uvx_src="$tmp/uvx"
+  fi
+}
+
+setup_dirs() {
+  log "创建目录并设置权限"
+  mkdir -p "${ALL_DIRS[@]}"
+  for d in "${ADMIN_DIRS[@]}"; do
+    chown root:"$UV_GROUP" "$d"; chmod 2775 "$d"
+  done
+  chown root:"$UV_GROUP" "$UV_ROOT/cache"; chmod 3777 "$UV_ROOT/cache"
+}
+
+setup_acl() {
+  log "设置 default ACL"
+  for d in "${ALL_DIRS[@]}"; do
+    setfacl -d -m g:"$UV_GROUP":rwx "$d"
+  done
+  setfacl -d -m o:rwx "$UV_ROOT/cache"
+  chmod o+rwx "$UV_ROOT/cache"
+}
+
+safe_install() {
+  local src="$1" dest="$2"; shift 2
+  if [ "$(readlink -f "$src" 2>/dev/null)" = "$(readlink -f "$dest" 2>/dev/null)" ]; then
+    chown root:"$UV_GROUP" "$dest" 2>/dev/null || true
+    chmod 0775 "$dest" 2>/dev/null || true
+  else
+    install "$@" "$src" "$dest"
+  fi
+}
+
+deploy_files() {
+  local src_dir="$1" index_url="${2:-}" env_src runtime_src
+  env_src="$src_dir/env.sh"
+  runtime_src="$MUV_RUNTIME_SRC"
+  [ -f "$env_src" ] || die "缺少模板: $env_src"
+  [ -f "$runtime_src" ] || die "缺少 muv: $runtime_src"
+
+  log "部署 uv / uvx / pip / env.sh / muv"
+  safe_install "$uv_src"  "$UV_ROOT/bin/uv"  -m 0775 -o root -g "$UV_GROUP"
+  safe_install "$uvx_src" "$UV_ROOT/bin/uvx" -m 0775 -o root -g "$UV_GROUP"
+  printf '#!/usr/bin/env bash\nexec %s/bin/uv pip "$@"\n' "$(shell_quote "$UV_ROOT")" > "$UV_ROOT/bin/pip"
+  chown root:"$UV_GROUP" "$UV_ROOT/bin/pip"
+  chmod 0755 "$UV_ROOT/bin/pip"
+
+  if [ "$(readlink -f "$env_src" 2>/dev/null)" != "$(readlink -f "$ENV_FILE" 2>/dev/null)" ]; then
+    install -m 0664 "$env_src" "$ENV_FILE"
+  fi
+  chown root:"$UV_GROUP" "$ENV_FILE" 2>/dev/null || true
+  chmod 0664 "$ENV_FILE" 2>/dev/null || true
+
+  safe_install "$runtime_src" "$UV_ROOT/bin/muv" -m 0775 -o root -g "$UV_GROUP"
+  write_runtime_config "$index_url"
+}
+
+setup_python() {
+  local ver="$1" pybin
+  log "安装默认 Python $ver"
+  run_uv python install "$ver"
+  pybin="$(run_uv python find "$ver" 2>/dev/null || true)"
+  if [ -n "$pybin" ] && [ -x "$pybin" ]; then
+    ln -sf "$pybin" "$UV_ROOT/bin/python3.${ver#*.}"
+    ln -sf "$pybin" "$UV_ROOT/bin/python3"
+    ln -sf "$pybin" "$UV_ROOT/bin/python"
+    log "python symlink -> $pybin"
+  fi
+}
+
+cmd_install() {
+  local index_url="" do_mirror=1 default_python="3.12"
+  TEMP_DIRS=()
+  trap cleanup_temp_dirs EXIT
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --prefix)    set_uv_root "$2"; shift 2 ;;
+      --group)     UV_GROUP="$2"; shift 2 ;;
+      --index)     index_url="$2"; do_mirror=0; shift 2 ;;
+      --no-mirror) do_mirror=0; shift ;;
+      --python)    default_python="$2"; shift 2 ;;
+      *)           die "install: 未知参数 $1" ;;
+    esac
+  done
+  need_root
+  command -v setfacl >/dev/null 2>&1 || die "缺少 setfacl，请先安装 acl 包"
+
+  ADMIN_DIRS=("$UV_ROOT" "$UV_ROOT/bin" "$UV_ROOT/tools" "$UV_ROOT/python" "$UV_ROOT/python-cache")
+  ALL_DIRS=("${ADMIN_DIRS[@]}" "$UV_ROOT/cache")
+
+  find_uv_binaries
+
+  local rfs hfs
+  rfs="$(df -P "$(dirname "$UV_ROOT")" 2>/dev/null | awk 'NR==2{print $1}')"
+  hfs="$(df -P /home 2>/dev/null | awk 'NR==2{print $1}')"
+  [ -n "$rfs" ] && [ -n "$hfs" ] && [ "$rfs" != "$hfs" ] \
+    && warn "$UV_ROOT 与 /home 不同分区，hardlink 将退化为 copy"
+
+  getent group "$UV_GROUP" >/dev/null && log "组 $UV_GROUP 已存在" \
+    || { log "创建组 $UV_GROUP"; groupadd "$UV_GROUP"; }
+
+  setup_dirs
+  setup_acl
+  deploy_files "$MUV_TEMPLATE_DIR" "$index_url"
+
+  if [ "$do_mirror" -eq 1 ]; then
+    log "使用 cnpip 选择镜像"
+    index_url="$(pick_fastest_index)" && log "选择镜像: $index_url" || warn "镜像选择失败，保留当前配置"
+  fi
+  [ -n "$index_url" ] && write_index "$index_url"
+
+  setup_python "$default_python"
+  fix_root_cache
+  "$UV_ROOT/bin/muv" doctor
+
+  cat <<EOF
+
+安装完成。请在用户 shell 配置中加入：source $ENV_FILE
+管理命令已安装到：$UV_ROOT/bin/muv
+EOF
+}
+
+# ===== 共用 =====
+
+cmd_help() { awk 'NR>1 && /^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"; }
+
 # ===== 分发 =====
+
+require_installed_context() {
+  [ "$MUV_RUNNING_MODE" = "installed" ] || [ "$MUV_EXPLICIT_UV_ROOT" -eq 1 ] \
+    || die "请先执行 ./muv install，然后使用 $UV_ROOT/bin/muv $cmd"
+}
 
 ORIG_ARGS=("$@")
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-  mirror)            ensure_runtime_context; cmd_mirror "$@" ;;
-  grant)             ensure_runtime_context; cmd_grant "$@" ;;
-  revoke)            ensure_runtime_context; cmd_revoke "$@" ;;
-  update)            ensure_runtime_context; cmd_update "$@" ;;
-  python)            ensure_runtime_context; cmd_python "$@" ;;
-  doctor)            ensure_runtime_context; cmd_doctor "$@" ;;
+  install)
+    MUV_LOG_NAME=install
+    cmd_install "$@"
+    ;;
+  mirror|grant|revoke|update|python|doctor)
+    require_installed_context
+    case "$cmd" in
+      mirror)  cmd_mirror "$@" ;;
+      grant)   cmd_grant "$@" ;;
+      revoke)  cmd_revoke "$@" ;;
+      update)  cmd_update "$@" ;;
+      python)  cmd_python "$@" ;;
+      doctor)  cmd_doctor "$@" ;;
+    esac
+    ;;
   help|-h|--help)    cmd_help ;;
   --version|version) cmd_version ;;
-  install)           die "安装请使用源码目录中的 install.sh" ;;
   *)                 die "未知命令: $cmd（muv help 查看用法）" ;;
 esac

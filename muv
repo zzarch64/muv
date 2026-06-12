@@ -67,7 +67,7 @@ else
 fi
 UV_GROUP="${UV_GROUP:-uvusers}"
 ENV_FILE="$UV_ROOT/env.sh"
-CONFIG_FILE="$UV_ROOT/muv.env"
+CONFIG_FILE="$UV_ROOT/config.env"
 
 # ===== 工具函数 =====
 
@@ -333,8 +333,8 @@ cmd_doctor() {
     || { echo "  组 $UV_GROUP: 缺失"; ok=0; }
   [ -r "$ENV_FILE" ] && echo "  env.sh: OK" \
     || { echo "  env.sh: 缺失"; ok=0; }
-  [ -r "$CONFIG_FILE" ] && echo "  muv.env: OK" \
-    || { echo "  muv.env: 缺失"; ok=0; }
+  [ -r "$CONFIG_FILE" ] && echo "  config.env: OK" \
+    || { echo "  config.env: 缺失"; ok=0; }
   [ -x "$UV_ROOT/bin/uv" ] && echo "  uv: OK $("$UV_ROOT/bin/uv" --version 2>/dev/null)" \
     || { echo "  uv: 缺失"; ok=0; }
   if command -v getfacl >/dev/null 2>&1; then
@@ -373,7 +373,7 @@ cleanup_temp_dirs() {
 set_uv_root() {
   UV_ROOT="$1"
   ENV_FILE="$UV_ROOT/env.sh"
-  CONFIG_FILE="$UV_ROOT/muv.env"
+  CONFIG_FILE="$UV_ROOT/config.env"
 }
 
 find_uv_binaries() {

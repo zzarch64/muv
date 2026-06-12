@@ -39,7 +39,7 @@ sudo ./muv install --python 3.11         # 指定默认 Python 版本(不传默�
 1. 创建 `uvusers` 组。
 2. 创建共享目录并设置权限/ACL。
 3. 部署 `uv`/`uvx`/`pip`/`env.sh`/`muv`。若源码 `bin/` 中没有 `uv`/`uvx`,安装器会从 `astral.sh` 下载。
-4. 写入 `$PREFIX/muv.env`,保存管理员组、默认镜像源等机器配置。
+4. 写入 `$PREFIX/config.env`,保存管理员组、默认镜像源等机器配置。
 5. 安装默认 Python 并执行自检。
 
 ## 快速开始
@@ -90,7 +90,7 @@ uv pip install requests       # 命中共享缓存
 ```
 $PREFIX/                   # 默认 /opt/uv
 ├── env.sh                 # 用户 source 的环境脚本模板(664 root:uvusers)
-├── muv.env                # 机器相关运行配置(664 root:uvusers)
+├── config.env             # 机器相关运行配置(664 root:uvusers)
 ├── bin/                   # 2775 root:uvusers — uv/uvx/pip/muv + Python symlink
 ├── cache/                 # 3777 root:uvusers — 共享缓存(所有用户可写,sticky 防互删)
 ├── python/                # 2775 root:uvusers — 共享 Python(仅管理员可装/删)
@@ -105,13 +105,13 @@ $PREFIX/                   # 默认 /opt/uv
 - **保护 uv/muv** —— `bin/` 为 `2775 root:uvusers` 且 ACL `other::r-x`:非 uvusers 用户既无法改 `bin/uv` / `bin/muv` 内容,也无法在 `bin/` 内替换它们,从文件系统层强制"只有 uv 管理员能管 uv"。`muv` 的成员校验只是更友好的报错,不是唯一防线。
 - **hardlink** —— `UV_LINK_MODE=hardlink` 让多用户 venv 共享缓存数据块,要求缓存与用户 home 在同一文件系统分区,跨分区自动 fallback 到 copy(安装时会提示)。
 
-## 配置(env.sh / muv.env)
+## 配置(env.sh / config.env)
 
 | 变量 | 值 | 生效范围 |
 |------|----|----------|
 | `UV_ROOT` / `UV_GROUP` | 安装前缀 / 管理员组(可被环境覆盖) | — |
 | `UV_CACHE_DIR` | `$UV_ROOT/cache` | 所有用户 |
-| `UV_DEFAULT_INDEX` | 镜像源(由 `muv install` / `muv mirror` 写入 `muv.env`,可被用户预设覆盖) | 所有用户 |
+| `UV_DEFAULT_INDEX` | 镜像源(由 `muv install` / `muv mirror` 写入 `config.env`,可被用户预设覆盖) | 所有用户 |
 | `UV_PYTHON_INSTALL_DIR` / `UV_PYTHON_CACHE_DIR` | `$UV_ROOT/python` / `python-cache` | 所有用户 |
 | `UV_MANAGED_PYTHON` | `true` | 所有用户 |
 | `UV_PYTHON_DOWNLOADS` | `never`(普通用户)/ `manual`(管理员) | 分层 |

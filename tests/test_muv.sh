@@ -14,7 +14,7 @@ make_runtime_root() {
   mkdir -p "$TMP_ROOT/bin" "$TMP_ROOT/cache" "$TMP_ROOT/python" "$TMP_ROOT/python-cache" "$TMP_ROOT/tools"
   chmod +t "$TMP_ROOT/cache"
   printf '# test env\n' > "$TMP_ROOT/env.sh"
-  printf "MUV_GROUP='%s'\n" "$(id -gn)" > "$TMP_ROOT/muv.env"
+  printf "MUV_GROUP='%s'\n" "$(id -gn)" > "$TMP_ROOT/config.env"
   cat > "$TMP_ROOT/bin/uv" <<'UVEOF'
 #!/usr/bin/env bash
 case "$*" in
@@ -103,7 +103,7 @@ FACLEOF
 
 test_doctor_uses_installed_prefix_when_config_missing() {
   make_runtime_root
-  rm -f "$TMP_ROOT/muv.env"
+  rm -f "$TMP_ROOT/config.env"
   local fake_path="$TMP_ROOT/fakebin" out="$TMP_ROOT/doctor.out"
   mkdir -p "$fake_path"
   cat > "$fake_path/getfacl" <<'FACLEOF'
@@ -112,12 +112,12 @@ printf 'default:other::rwx\n'
 FACLEOF
   chmod +x "$fake_path/getfacl"
   if PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" doctor >"$out" 2>&1; then
-    fail "doctor should fail when muv.env is missing"
+    fail "doctor should fail when config.env is missing"
   fi
   grep -Fq "检查 $TMP_ROOT" "$out" \
-    || fail "doctor should inspect the installed prefix when muv.env is missing"
-  grep -Fq "muv.env: 缺失" "$out" \
-    || fail "doctor should report missing muv.env"
+    || fail "doctor should inspect the installed prefix when config.env is missing"
+  grep -Fq "config.env: 缺失" "$out" \
+    || fail "doctor should report missing config.env"
   if grep -Fq "/opt/uv" "$out"; then
     fail "doctor should not fall back to /opt/uv when installed env.sh exists"
   fi
@@ -224,9 +224,9 @@ test_config_read_does_not_execute_commands() {
     printf "MUV_GROUP='%s'\n" "$(id -gn)"
     printf "MUV_DEFAULT_INDEX='https://example.invalid/simple/'\n"
     printf "touch '%s'\n" "$marker"
-  } > "$TMP_ROOT/muv.env"
+  } > "$TMP_ROOT/config.env"
   UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" doctor >/dev/null 2>&1 || true
-  [ ! -e "$marker" ] || fail "reading muv.env should not execute commands"
+  [ ! -e "$marker" ] || fail "reading config.env should not execute commands"
 }
 
 test_update_cleans_temp_dir_on_bootstrap_failure() {

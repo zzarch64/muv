@@ -2,7 +2,7 @@
 # Source this file only if you want to use the shared uv installation.
 
 # 安装前缀与管理员组：默认值可在 source 前用环境变量覆盖。
-# 机器相关配置由安装目录下的 muv.env 提供，env.sh 本身保持模板化。
+# 机器相关配置由安装目录下的 config.env 提供，env.sh 本身保持模板化。
 _muv_env_path=""
 if [ -n "${BASH_SOURCE:-}" ]; then
   _muv_env_path="${BASH_SOURCE[0]}"
@@ -19,14 +19,14 @@ if [ -z "${UV_ROOT+x}" ]; then
   fi
 fi
 
-_muv_config="${UV_CONFIG_FILE:-${UV_ROOT}/muv.env}"
+_muv_config="${UV_CONFIG_FILE:-${UV_ROOT}/config.env}"
 [ -r "$_muv_config" ] && . "$_muv_config"
 
 UV_GROUP="${UV_GROUP:-${MUV_GROUP:-uvusers}}"
 
 # 所有用户都能用的部分
 export UV_CACHE_DIR="${UV_ROOT}/cache"
-# 镜像源：默认值由 muv install / muv mirror 写入 muv.env；用户可在 source 前预设覆盖
+# 镜像源：默认值由 muv install / muv mirror 写入 config.env；用户可在 source 前预设覆盖
 export UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX:-${MUV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple/}}"
 
 # uv-managed Python 共享存储（仅管理员可写，版本集中管理）

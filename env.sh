@@ -1,14 +1,33 @@
 # Optional shared uv environment.
 # Source this file only if you want to use the shared uv installation.
 
-# 安装前缀与管理员组：默认值可在 source 前用环境变量覆盖
-UV_ROOT="${UV_ROOT:-/opt/uv}"
-UV_GROUP="${UV_GROUP:-uvusers}"
+# 安装前缀与管理员组：默认值可在 source 前用环境变量覆盖。
+# 机器相关配置由安装目录下的 muv.env 提供，env.sh 本身保持模板化。
+_muv_env_path=""
+if [ -n "${BASH_SOURCE:-}" ]; then
+  _muv_env_path="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  _muv_env_path="${(%):-%x}"
+fi
+
+if [ -z "${UV_ROOT+x}" ]; then
+  if [ -n "$_muv_env_path" ]; then
+    _muv_env_dir="$(cd "$(dirname "$_muv_env_path")" >/dev/null 2>&1 && pwd -P)"
+    UV_ROOT="${_muv_env_dir:-/opt/uv}"
+  else
+    UV_ROOT="/opt/uv"
+  fi
+fi
+
+_muv_config="${UV_CONFIG_FILE:-${UV_ROOT}/muv.env}"
+[ -r "$_muv_config" ] && . "$_muv_config"
+
+UV_GROUP="${UV_GROUP:-${MUV_GROUP:-uvusers}}"
 
 # 所有用户都能用的部分
 export UV_CACHE_DIR=${UV_ROOT}/cache
-# 镜像源：下方默认值由 muv install/mirror 用 cnpip 测速后替换；用户可在 source 前预设覆盖
-export UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple/}
+# 镜像源：默认值由 install.sh / muv mirror 写入 muv.env；用户可在 source 前预设覆盖
+export UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX:-${MUV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple/}}
 
 # uv-managed Python 共享存储（仅管理员可写，版本集中管理）
 export UV_PYTHON_INSTALL_DIR=${UV_ROOT}/python
@@ -43,3 +62,4 @@ export UV_LINK_MODE=hardlink
 
 # 权限由目录级 default ACL 统一保证，不修改用户 umask
 
+unset _muv_env_path _muv_env_dir _muv_config

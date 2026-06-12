@@ -36,6 +36,9 @@ export UV_MANAGED_PYTHON="true"
 # 普通用户禁止下载/安装 Python，只能使用管理员预置的版本（下方管理员段会放开）
 export UV_PYTHON_DOWNLOADS="never"
 
+# ext4 不支持 reflink/CoW，显式使用 hardlink 共享缓存数据块
+export UV_LINK_MODE="hardlink"
+
 # 避免重复追加 PATH
 case ":$PATH:" in
   *":${UV_ROOT}/bin:"*) ;;
@@ -56,9 +59,6 @@ export UV_PYTHON_DOWNLOADS="manual"
 # uv tool 共享存储（仅管理员）
 export UV_TOOL_DIR="${UV_ROOT}/tools"
 export UV_TOOL_BIN_DIR="${UV_ROOT}/bin"
-
-# ext4 不支持 reflink/CoW，显式使用 hardlink 共享缓存数据块
-export UV_LINK_MODE="hardlink"
 
 # 权限由目录级 default ACL 统一保证，不修改用户 umask
 

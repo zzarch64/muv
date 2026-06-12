@@ -80,8 +80,7 @@ setup_acl() {
     setfacl -d -m g:"$UV_GROUP":rwx "$d"
   done
   setfacl -d -m o:rwx "$UV_ROOT/cache"
-  chmod -R o+rwX "$UV_ROOT/cache" 2>/dev/null || true
-  find "$UV_ROOT/cache" -type d -exec chmod +t {} + 2>/dev/null || true
+  chmod o+rwx "$UV_ROOT/cache"
 }
 
 safe_install() {
@@ -184,6 +183,7 @@ cmd_install() {
   [ -n "$index_url" ] && write_index "$index_url"
 
   setup_python "$default_python"
+  fix_root_cache
   "$UV_ROOT/bin/muv" doctor
 
   cat <<EOF

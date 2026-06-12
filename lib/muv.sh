@@ -104,3 +104,34 @@ acquire_muv_lock() {
   chown root:"$UV_GROUP" "$lock_file" 2>/dev/null || true
   chmod 0664 "$lock_file" 2>/dev/null || true
 }
+
+# root 在 sticky 缓存目录里留下的普通文件，会被 Linux fs.protected_regular
+# 拦截（非 root 用户无法 open root 拥有的文件，即使权限位是 666）。
+# 此函数将 root 拥有的缓存文件转交给实际操作者（SUDO_USER 或 uvusers 成员）。
+# 仅在 root 身份下有效。
+fix_root_cache() {
+  [ "$(id -u)" -eq 0 ] || return 0
+  [ -d "$UV_ROOT/cache" ] || return 0
+
+  local target=""
+  # 优先用 SUDO_USER（谁跑的 sudo install.sh）
+  [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" &>/dev/null && target="$SUDO_USER"
+  # 回退：取 uvusers 组的第一个成员
+  [ -z "$target" ] && target=$(getent group "$UV_GROUP" 2>/dev/null | cut -d: -f4 | cut -d, -f1)
+  [ -n "$target" ] || return 0
+
+  local count
+  count=$(find "$UV_ROOT/cache" -mindepth 1 -user root -type f -printf . 2>/dev/null | wc -c)
+  [ "$count" -gt 0 ] || return 0
+
+  find "$UV_ROOT/cache" -mindepth 1 -user root -type f \
+    -exec chown "$target:$UV_GROUP" {} + 2>/dev/null || true
+  log "已修复 $count 个 root 拥有的缓存文件 -> $target"
+}
+
+# 检查缓存中是否有 root 拥有的文件（doctor 用）。
+# 返回文件数（0 表示无问题）。
+check_root_cache() {
+  [ -d "$UV_ROOT/cache" ] || { printf '%s\n' "0"; return; }
+  find "$UV_ROOT/cache" -mindepth 1 -user root -type f -printf . 2>/dev/null | wc -c
+}

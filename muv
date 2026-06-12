@@ -159,6 +159,7 @@ cmd_python() {
       [ -n "$ver" ] || die "用法: muv python add <ver>"
       log "安装共享 Python $ver 到 $UV_ROOT/python"
       run_uv python install "$ver"
+      fix_root_cache
       log "Python $ver 已安装到共享目录；已加载 env.sh 的用户可使用该版本"
       ;;
     rm|remove|uninstall)
@@ -204,6 +205,19 @@ cmd_doctor() {
   else warn "未找到 getfacl，未检查 ACL"; fi
   [ -k "$UV_ROOT/cache" ] && echo "  cache sticky bit: OK" \
     || { echo "  cache sticky bit: 缺失"; ok=0; }
+  local root_files
+  root_files="$(check_root_cache)"
+  if [ "$root_files" -gt 0 ] 2>/dev/null; then
+    echo "  cache root 文件: $root_files 个（fs.protected_regular 会阻止非 root 用户访问）"
+    if [ "$(id -u)" -eq 0 ]; then
+      fix_root_cache
+    else
+      warn "以 sudo muv doctor 运行可自动修复"
+    fi
+    ok=0
+  else
+    echo "  cache root 文件: OK"
+  fi
   index_url="$(read_config_var MUV_DEFAULT_INDEX 2>/dev/null || true)"
   [ -n "$index_url" ] && echo "  镜像源: $index_url" || echo "  镜像源: 未配置"
   [ "$ok" -eq 1 ] && log "检查通过" || { warn "存在问题，见上"; return 1; }

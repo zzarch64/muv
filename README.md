@@ -28,6 +28,7 @@
 sudo ./muv install                       # 装到默认 /opt/uv,并测速选镜像
 sudo ./muv install --prefix /srv/uv      # 自定义安装前缀
 sudo ./muv install --index <url>         # 指定镜像源,不执行镜像测速
+sudo ./muv install --index auto         # 自动测速选最快镜像
 sudo ./muv install --python 3.11         # 指定默认 Python 版本(不传默认 3.12)
 ```
 
@@ -70,11 +71,11 @@ uv pip install requests       # 命中共享缓存
 
 | 命令 | 作用 | 权限 |
 |------|------|------|
-| `muv install [--prefix d] [--group g] [--index url\|--no-mirror] [--python X.Y]` | 安装/修复共享环境;`--python` 默认 `3.12` | root |
+| `muv install [--prefix d] [--group g] [--index url\|auto] [--python X.Y]` | 安装/修复共享环境;`--python` 默认 `3.12` | root |
 | `muv grant <user>...` | 把用户加入 `uvusers` 组 | root |
 | `muv revoke <user>...` | 把用户移出 `uvusers` 组 | root |
 | `muv mirror [<url>]` | 替换镜像源;不带 url 用 cnpip 测速自动选最快 | uvusers 成员 |
-| `muv update` | 从官网下载最新 uv 并替换共享二进制 | uvusers 成员 |
+| `muv update` | 从官网下载最新 uv 并替换共享二进制 | root |
 | `muv python add <ver>` | 安装共享 Python | uvusers 成员 |
 | `muv python rm [--yes] <ver>` | 删除共享 Python(默认从终端确认;脚本化需显式 `--yes`) | uvusers 成员 |
 | `muv python list` | 列出已安装的共享 Python | 任何人 |
@@ -120,7 +121,7 @@ $PREFIX/                   # 默认 /opt/uv
 
 ## 角色与权限
 
-常规使用不需要 sudo。`muv install` / `muv grant` / `muv revoke` 需要 root;`muv mirror` / `muv update` / `muv python add` / `muv python rm` 需要 `uvusers` 成员身份;`muv python list` / `muv doctor` / `muv help` 任意用户可执行。
+常规使用不需要 sudo。`muv install` / `muv grant` / `muv revoke` / `muv update` 需要 root;`muv mirror` / `muv python add` / `muv python rm` 需要 `uvusers` 成员身份;`muv python list` / `muv doctor` / `muv help` 任意用户可执行。
 
 | 操作 | 管理员 | 普通用户 |
 |------|--------|----------|

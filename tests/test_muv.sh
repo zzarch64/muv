@@ -101,9 +101,38 @@ FACLEOF
   fi
 }
 
+test_doctor_uses_installed_prefix_when_config_missing() {
+  make_runtime_root
+  rm -f "$TMP_ROOT/muv.env"
+  local fake_path="$TMP_ROOT/fakebin" out="$TMP_ROOT/doctor.out"
+  mkdir -p "$fake_path"
+  cat > "$fake_path/getfacl" <<'FACLEOF'
+#!/usr/bin/env bash
+printf 'default:other::rwx\n'
+FACLEOF
+  chmod +x "$fake_path/getfacl"
+  if PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" doctor >"$out" 2>&1; then
+    fail "doctor should fail when muv.env is missing"
+  fi
+  grep -Fq "检查 $TMP_ROOT" "$out" \
+    || fail "doctor should inspect the installed prefix when muv.env is missing"
+  grep -Fq "muv.env: 缺失" "$out" \
+    || fail "doctor should report missing muv.env"
+  if grep -Fq "/opt/uv" "$out"; then
+    fail "doctor should not fall back to /opt/uv when installed env.sh exists"
+  fi
+}
+
 test_install_sets_pip_group_ownership() {
-  grep -Fq 'chown root:"$UV_GROUP" "$UV_ROOT/bin/pip"' "$ROOT_DIR/muv" \
-    || fail "muv should set group ownership for pip wrapper"
+  make_runtime_root
+  local fake_path pip_group pip_mode
+  fake_path="$(make_root_fake_path)"
+  PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" install >/dev/null 2>&1 \
+    || fail "install should succeed with fake root helpers"
+  pip_group="$(stat -c '%G' "$TMP_ROOT/bin/pip")"
+  pip_mode="$(stat -c '%a' "$TMP_ROOT/bin/pip")"
+  [ "$pip_group" = "$(id -gn)" ] || fail "pip wrapper should use the configured group"
+  [ "$pip_mode" = "755" ] || fail "pip wrapper should be executable"
 }
 
 test_install_subcommand_in_help() {
@@ -149,11 +178,42 @@ SUDOEOF
   grep -Fxq -- "alice" "$sudo_log" || fail "auto sudo should preserve the original arguments"
 }
 
+test_update_auto_sudo_with_resolved_runtime_path() {
+  make_runtime_root
+  local fake_path="$TMP_ROOT/nonroot-update-fakebin" sudo_log="$TMP_ROOT/update-sudo-args"
+  mkdir -p "$fake_path"
+  cat > "$fake_path/id" <<'IDEOF'
+#!/usr/bin/env bash
+if [ "$1" = "-u" ]; then
+  printf '1000\n'
+else
+  /usr/bin/id "$@"
+fi
+IDEOF
+  cat > "$fake_path/sudo" <<'SUDOEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$MUV_TEST_SUDO_LOG"
+exit 99
+SUDOEOF
+  chmod +x "$fake_path/id" "$fake_path/sudo"
+
+  if PATH="$fake_path:$PATH" UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" \
+      MUV_TEST_SUDO_LOG="$sudo_log" "$TMP_ROOT/bin/muv" update >/dev/null 2>&1; then
+    fail "update auto sudo should return the sudo exit status for non-root users"
+  fi
+  [ -f "$sudo_log" ] || fail "muv update should invoke sudo automatically"
+  grep -Fxq -- "-E" "$sudo_log" || fail "update auto sudo should preserve environment with -E"
+  grep -Fxq -- "UV_ROOT=$TMP_ROOT" "$sudo_log" || fail "update auto sudo should pass UV_ROOT explicitly"
+  grep -Fxq -- "UV_GROUP=$(id -gn)" "$sudo_log" || fail "update auto sudo should pass UV_GROUP explicitly"
+  grep -Fxq -- "$TMP_ROOT/bin/muv" "$sudo_log" || fail "update auto sudo should use the resolved runtime path"
+  grep -Fxq -- "update" "$sudo_log" || fail "update auto sudo should preserve the original command"
+}
+
 test_installed_muv_can_repair_installation() {
   make_runtime_root
   local fake_path
   fake_path="$(make_root_fake_path)"
-  PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" install --no-mirror >/dev/null 2>&1 \
+  PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" install >/dev/null 2>&1 \
     || fail "installed muv should repair installation using its own runtime command"
 }
 
@@ -192,16 +252,69 @@ FAILEOF
   [ ! -d "$update_tmp" ] || fail "muv update should clean temp dir after bootstrap failure"
 }
 
+test_install_options_require_values() {
+  local opt out
+  for opt in --prefix --group --index --python; do
+    out="$("$ROOT_DIR/muv" install "$opt" 2>&1 || true)"
+    printf '%s\n' "$out" | grep -Fq "install: $opt 需要参数" \
+      || fail "install $opt without value should report a stable error"
+    if printf '%s\n' "$out" | grep -Fq "unbound variable"; then
+      fail "install $opt without value should not expose bash internals"
+    fi
+  done
+}
+
+test_no_mirror_rejected() {
+  local out
+  out="$("$ROOT_DIR/muv" install --no-mirror 2>&1 || true)"
+  printf '%s\n' "$out" | grep -Fq "未知参数" \
+    || fail "install --no-mirror should be rejected as unknown argument"
+}
+
+test_index_auto_accepted() {
+  make_runtime_root
+  local fake_path
+  fake_path="$(make_root_fake_path)"
+  # --index auto should be accepted (mirror selection will fail but that's OK)
+  PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" install --index auto >/dev/null 2>&1 \
+    || fail "install --index auto should be accepted"
+}
+
+test_python_list_rejects_extra_arguments() {
+  make_runtime_root
+  if UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" python list junk >/dev/null 2>&1; then
+    fail "python list should reject extra version arguments"
+  fi
+  if UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" python list --yes >/dev/null 2>&1; then
+    fail "python list should reject --yes"
+  fi
+}
+
+test_python_list_forms_still_work() {
+  make_runtime_root
+  UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" python list | grep -Fxq 'cpython-3.12' \
+    || fail "python list should list installed versions"
+  UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" "$TMP_ROOT/bin/muv" python | grep -Fxq 'cpython-3.12' \
+    || fail "python without subcommand should list installed versions"
+}
+
 test_functions_are_inline
 test_version_flag
 test_python_rm_ignores_piped_confirmation
 test_doctor_fails_when_env_missing
+test_doctor_uses_installed_prefix_when_config_missing
 test_install_sets_pip_group_ownership
 test_install_subcommand_in_help
 test_source_mode_blocks_runtime_commands
 test_root_commands_auto_sudo_with_resolved_runtime_path
+test_update_auto_sudo_with_resolved_runtime_path
 test_installed_muv_can_repair_installation
 test_config_read_does_not_execute_commands
 test_update_cleans_temp_dir_on_bootstrap_failure
+test_install_options_require_values
+test_no_mirror_rejected
+test_index_auto_accepted
+test_python_list_rejects_extra_arguments
+test_python_list_forms_still_work
 
 printf 'ok - muv regression tests\n'

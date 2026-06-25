@@ -23,6 +23,7 @@ case "$*" in
   "python find 3.12") printf '%s\n' "$UV_PYTHON_INSTALL_DIR/cpython-3.12/bin/python3.12" ;;
   "python uninstall 3.12") touch "$UV_ROOT_UNINSTALL_MARKER" ;;
   "python list --only-installed") printf 'cpython-3.12\n' ;;
+  "pip install --default-index "*) [ -n "${MUV_TEST_PREWARM_MARKER:-}" ] && touch "$MUV_TEST_PREWARM_MARKER"; exit 0 ;;
   *) printf 'unexpected uv args: %s\n' "$*" >&2; exit 64 ;;
 esac
 UVEOF
@@ -71,6 +72,13 @@ test_functions_are_inline() {
   done
 }
 
+test_lock_functions_are_inline() {
+  for func in for_each_index_dir lock_index_dir unlock_index_dir prewarm_index; do
+    grep -Eq "^${func}\(\)" "$ROOT_DIR/muv" \
+      || fail "muv should define $func()"
+  done
+}
+
 test_version_flag() {
   "$ROOT_DIR/muv" --version >/dev/null || fail "muv --version should succeed"
 }
@@ -83,6 +91,66 @@ test_python_rm_ignores_piped_confirmation() {
     fail "piped confirmation should not authorize python rm"
   fi
   [ ! -e "$marker" ] || fail "python rm should not uninstall after piped confirmation"
+}
+
+test_doctor_reports_locked_index() {
+  make_runtime_root
+  printf "MUV_GROUP='%s'\nMUV_DEFAULT_INDEX='https://example.invalid/simple'\n" "$(id -gn)" \
+    > "$TMP_ROOT/config.env"
+  mkdir -p "$TMP_ROOT/cache/simple-v21/index" "$TMP_ROOT/cache/wheels-v6/index"
+  local fake_path="$TMP_ROOT/locked-fakebin" out="$TMP_ROOT/doctor.out"
+  mkdir -p "$fake_path"
+  cat > "$fake_path/getfacl" <<'FACLEOF'
+#!/usr/bin/env bash
+printf 'default:other::rwx\nmask::r-x\nother::r-x\n'
+FACLEOF
+  cat > "$fake_path/stat" <<'STATEOF'
+#!/usr/bin/env bash
+# index/ 报为 root 拥有；其余委托真实 stat
+if [ "$1" = "-c" ] && [ "$2" = "%U" ]; then printf 'root\n'; else /usr/bin/stat "$@"; fi
+STATEOF
+  chmod +x "$fake_path/getfacl" "$fake_path/stat"
+  PATH="$fake_path:$PATH" UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" \
+    "$TMP_ROOT/bin/muv" doctor >"$out" 2>&1 || true
+  grep -Fq "index 锁: OK" "$out" \
+    || { cat "$out"; fail "doctor should report index lock OK when locked"; }
+}
+
+test_doctor_reports_unlocked_index() {
+  make_runtime_root
+  printf "MUV_GROUP='%s'\nMUV_DEFAULT_INDEX='https://example.invalid/simple'\n" "$(id -gn)" \
+    > "$TMP_ROOT/config.env"
+  mkdir -p "$TMP_ROOT/cache/simple-v21/index" "$TMP_ROOT/cache/wheels-v6/index"
+  local fake_path="$TMP_ROOT/unlocked-fakebin" out="$TMP_ROOT/doctor.out"
+  mkdir -p "$fake_path"
+  cat > "$fake_path/getfacl" <<'FACLEOF'
+#!/usr/bin/env bash
+printf 'default:other::rwx\nmask::rwx\nother::rwx\n'
+FACLEOF
+  chmod +x "$fake_path/getfacl"
+  if PATH="$fake_path:$PATH" UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" \
+      "$TMP_ROOT/bin/muv" doctor >"$out" 2>&1; then
+    fail "doctor should fail when index is configured but not locked"
+  fi
+  grep -Fq "index 锁: 未锁定" "$out" \
+    || { cat "$out"; fail "doctor should report index lock missing when unlocked"; }
+}
+
+test_doctor_index_lock_not_applicable_without_config() {
+  make_runtime_root
+  rm -f "$TMP_ROOT/config.env"
+  printf "MUV_GROUP='%s'\n" "$(id -gn)" > "$TMP_ROOT/config.env"
+  local fake_path="$TMP_ROOT/noidx-fakebin" out="$TMP_ROOT/doctor.out"
+  mkdir -p "$fake_path"
+  cat > "$fake_path/getfacl" <<'FACLEOF'
+#!/usr/bin/env bash
+printf 'default:other::rwx\n'
+FACLEOF
+  chmod +x "$fake_path/getfacl"
+  PATH="$fake_path:$PATH" UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" \
+    "$TMP_ROOT/bin/muv" doctor >"$out" 2>&1 || true
+  grep -Fq "index 锁: 未启用" "$out" \
+    || { cat "$out"; fail "doctor should mark index lock not-applicable without a configured source"; }
 }
 
 test_doctor_fails_when_env_missing() {
@@ -135,6 +203,26 @@ test_install_sets_pip_group_ownership() {
   [ "$pip_mode" = "755" ] || fail "pip wrapper should be executable"
 }
 
+test_install_without_index_does_not_lock() {
+  make_runtime_root
+  local fake_path marker="$TMP_ROOT/prewarmed"
+  fake_path="$(make_root_fake_path)"
+  PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" MUV_TEST_PREWARM_MARKER="$marker" \
+    "$TMP_ROOT/bin/muv" install >/dev/null 2>&1 \
+    || fail "install without --index should still succeed"
+  [ ! -e "$marker" ] || fail "install without --index should not prewarm/lock the cache"
+}
+
+test_install_with_index_prewarms_and_locks() {
+  make_runtime_root
+  local fake_path marker="$TMP_ROOT/prewarmed"
+  fake_path="$(make_root_fake_path)"
+  PATH="$fake_path:$PATH" UV_GROUP="$(id -gn)" MUV_TEST_PREWARM_MARKER="$marker" \
+    "$TMP_ROOT/bin/muv" install --index https://example.invalid/simple >/dev/null 2>&1 \
+    || fail "install --index should succeed"
+  [ -e "$marker" ] || fail "install --index should prewarm the configured source"
+}
+
 test_install_subcommand_in_help() {
   "$ROOT_DIR/muv" help | grep -q "install" \
     || fail "help should mention install subcommand"
@@ -178,6 +266,35 @@ SUDOEOF
   grep -Fxq -- "alice" "$sudo_log" || fail "auto sudo should preserve the original arguments"
 }
 
+test_mirror_requires_root_auto_sudo() {
+  make_runtime_root
+  local fake_path="$TMP_ROOT/mirror-fakebin" sudo_log="$TMP_ROOT/mirror-sudo-args"
+  mkdir -p "$fake_path"
+  cat > "$fake_path/id" <<'IDEOF'
+#!/usr/bin/env bash
+if [ "$1" = "-u" ]; then
+  printf '1000\n'
+else
+  /usr/bin/id "$@"
+fi
+IDEOF
+  cat > "$fake_path/sudo" <<'SUDOEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$MUV_TEST_SUDO_LOG"
+exit 99
+SUDOEOF
+  chmod +x "$fake_path/id" "$fake_path/sudo"
+
+  if PATH="$fake_path:$PATH" UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" \
+      MUV_TEST_SUDO_LOG="$sudo_log" "$TMP_ROOT/bin/muv" mirror https://example.invalid/simple 2>/dev/null; then
+    fail "mirror auto sudo should return the sudo exit status for non-root users"
+  fi
+  [ -f "$sudo_log" ] || fail "muv mirror should invoke sudo automatically"
+  grep -Fxq -- "mirror" "$sudo_log" || fail "mirror auto sudo should preserve the original command"
+  grep -Fxq -- "https://example.invalid/simple" "$sudo_log" \
+    || fail "mirror auto sudo should preserve the original arguments"
+}
+
 test_update_auto_sudo_with_resolved_runtime_path() {
   make_runtime_root
   local fake_path="$TMP_ROOT/nonroot-update-fakebin" sudo_log="$TMP_ROOT/update-sudo-args"
@@ -207,6 +324,65 @@ SUDOEOF
   grep -Fxq -- "UV_GROUP=$(id -gn)" "$sudo_log" || fail "update auto sudo should pass UV_GROUP explicitly"
   grep -Fxq -- "$TMP_ROOT/bin/muv" "$sudo_log" || fail "update auto sudo should use the resolved runtime path"
   grep -Fxq -- "update" "$sudo_log" || fail "update auto sudo should preserve the original command"
+}
+
+# 让 bootstrap_uv 的 `curl | sh` 落地一份可用的 uv/uvx mock。
+make_update_fake_path() {
+  local fake_path="$TMP_ROOT/update-run-fakebin"
+  cp -r "$(make_root_fake_path)" "$fake_path"
+  cat > "$fake_path/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+cat <<'INSTALLER'
+mkdir -p "$UV_INSTALL_DIR"
+cat > "$UV_INSTALL_DIR/uv" <<'UVEOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") printf 'uv 0.test\n' ;;
+  "pip install --default-index "*) [ -n "${MUV_TEST_PREWARM_MARKER:-}" ] && touch "$MUV_TEST_PREWARM_MARKER"; exit 0 ;;
+  *) exit 0 ;;
+esac
+UVEOF
+chmod +x "$UV_INSTALL_DIR/uv"
+cp "$UV_INSTALL_DIR/uv" "$UV_INSTALL_DIR/uvx"
+INSTALLER
+CURLEOF
+  cp "$fake_path/curl" "$fake_path/wget"
+  # install -o root -g 在非 root 下会真正 chown 失败；剥掉属主/权限选项，仅复制。
+  cat > "$fake_path/install" <<'INSTEOF'
+#!/usr/bin/env bash
+args=(); while [ $# -gt 0 ]; do
+  case "$1" in
+    -m|-o|-g) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec /usr/bin/install "${args[@]}"
+INSTEOF
+  chmod +x "$fake_path/curl" "$fake_path/wget" "$fake_path/install"
+  printf '%s\n' "$fake_path"
+}
+
+test_update_relocks_when_index_configured() {
+  make_runtime_root
+  local fake_path marker="$TMP_ROOT/prewarmed"
+  fake_path="$(make_update_fake_path)"
+  printf "MUV_GROUP='%s'\nMUV_DEFAULT_INDEX='https://example.invalid/simple'\n" "$(id -gn)" \
+    > "$TMP_ROOT/config.env"
+  PATH="$fake_path:$PATH" UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" MUV_TEST_PREWARM_MARKER="$marker" \
+    "$TMP_ROOT/bin/muv" update >/dev/null 2>&1 \
+    || fail "update should succeed when an index is configured"
+  [ -e "$marker" ] || fail "update should re-prewarm/lock the configured source"
+}
+
+test_update_does_not_lock_without_index() {
+  make_runtime_root
+  local fake_path marker="$TMP_ROOT/prewarmed"
+  fake_path="$(make_update_fake_path)"
+  printf "MUV_GROUP='%s'\n" "$(id -gn)" > "$TMP_ROOT/config.env"
+  PATH="$fake_path:$PATH" UV_ROOT="$TMP_ROOT" UV_GROUP="$(id -gn)" MUV_TEST_PREWARM_MARKER="$marker" \
+    "$TMP_ROOT/bin/muv" update >/dev/null 2>&1 \
+    || fail "update should succeed without a configured index"
+  [ ! -e "$marker" ] || fail "update should not lock when no index is configured"
 }
 
 test_installed_muv_can_repair_installation() {
@@ -299,15 +475,24 @@ test_python_list_forms_still_work() {
 }
 
 test_functions_are_inline
+test_lock_functions_are_inline
 test_version_flag
 test_python_rm_ignores_piped_confirmation
+test_doctor_reports_locked_index
+test_doctor_reports_unlocked_index
+test_doctor_index_lock_not_applicable_without_config
 test_doctor_fails_when_env_missing
 test_doctor_uses_installed_prefix_when_config_missing
 test_install_sets_pip_group_ownership
+test_install_without_index_does_not_lock
+test_install_with_index_prewarms_and_locks
 test_install_subcommand_in_help
 test_source_mode_blocks_runtime_commands
 test_root_commands_auto_sudo_with_resolved_runtime_path
+test_mirror_requires_root_auto_sudo
 test_update_auto_sudo_with_resolved_runtime_path
+test_update_relocks_when_index_configured
+test_update_does_not_lock_without_index
 test_installed_muv_can_repair_installation
 test_config_read_does_not_execute_commands
 test_update_cleans_temp_dir_on_bootstrap_failure

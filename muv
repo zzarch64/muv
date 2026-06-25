@@ -12,7 +12,7 @@
 #     --group <name>                管理员组。默认: uvusers。
 #     --index <url|auto>            配置包索引地址。auto=自动测速选镜像；不传则保留现有配置。
 #     --python <version>            安装默认托管 Python 版本。默认: 3.12。
-#   mirror [url]                    配置镜像源。未提供 url 时自动选择。
+#   mirror [url]                    配置镜像源并锁定缓存（需 root）。未提供 url 时自动选择。
 #   grant <user>...                 授权用户管理权限。
 #   revoke <user>...                撤销用户管理权限。
 #   update                          下载并替换 uv 与 uvx。
@@ -217,6 +217,61 @@ check_root_cache() {
   find "$UV_ROOT/cache" -mindepth 1 -user root -type f -printf . 2>/dev/null | wc -c
 }
 
+# ===== 缓存源锁定 =====
+#
+# uv 缓存按"源 URL 哈希"在 simple-v*/index/ 与 wheels-v*/index/ 下分桶。
+# 锁定 index/ 这一层（chown root + ACL mask/other 降为 r-x）后，只有 root
+# 能在其下新建桶，普通用户无法用 --default-index 切换到其它源写入新桶。
+# 已存在的审定桶仍对所有用户可写（桶自身权限不变），default ACL 保持 rwx
+# 保证 root 新建的审定桶仍世界可写。
+
+# 对每个存在的 index 目录执行操作。$1=操作函数。
+# 目标：$UV_ROOT/cache/{simple,wheels}-v*/index
+for_each_index_dir() {
+  local action="$1" d
+  for d in "$UV_ROOT"/cache/simple-v*/index "$UV_ROOT"/cache/wheels-v*/index; do
+    [ -d "$d" ] || continue
+    "$action" "$d"
+  done
+}
+
+# 锁定单个 index 目录：只有 root 能在其下新建桶。
+lock_index_dir() {
+  local dir="$1"
+  chown root:"$UV_GROUP" "$dir" 2>/dev/null || true
+  setfacl -m o::r-x,m::r-x "$dir" 2>/dev/null || true
+  setfacl -d -m g:"$UV_GROUP":rwx,o::rwx "$dir" 2>/dev/null || true
+}
+
+# 解锁单个 index 目录：恢复组/other 可写，供预热建桶。
+unlock_index_dir() {
+  local dir="$1"
+  setfacl -m o::rwx,m::rwx "$dir" 2>/dev/null || true
+}
+
+# 判断单个 index 目录是否已锁定：owner=root 且 ACL mask/other 均为 r-x。
+index_dir_is_locked() {
+  local dir="$1" acl
+  [ "$(stat -c '%U' "$dir" 2>/dev/null)" = "root" ] || return 1
+  acl="$(getfacl -p "$dir" 2>/dev/null)" || return 1
+  printf '%s\n' "$acl" | grep -q '^mask::r-x$' || return 1
+  printf '%s\n' "$acl" | grep -q '^other::r-x$' || return 1
+  return 0
+}
+
+# 用指定审定源真实安装一个极小包，建出 simple + wheels 审定桶。
+# 必须显式传 --default-index（run_uv 未设 UV_DEFAULT_INDEX，否则会给 pypi.org 建桶）。
+# 失败返回非 0，调用方据此跳过加锁，避免把环境锁成不可用。
+prewarm_index() {
+  local url="$1" tmp rc=0
+  [ -n "$url" ] || return 1
+  tmp="$(mktemp -d)" || return 1
+  run_uv pip install --default-index "$url" --target "$tmp" six >/dev/null 2>&1 || rc=1
+  rm -rf "$tmp"
+  fix_root_cache
+  return "$rc"
+}
+
 # ===== 运行时函数 =====
 
 # root 或管理员组成员可执行组可写资源的管理命令。
@@ -245,7 +300,27 @@ foreach_user() {
   done
 }
 
+# 换源后重建并锁定 index：解锁 → 清空所有旧桶 → 用新源预热建桶 → 重新锁定。
+# 仅删 index/ 下的桶（元数据），绝不触碰内容寻址的 archive-v0/，故不影响已装 venv。
+relock_index_for_url() {
+  local url="$1"
+  for_each_index_dir unlock_index_dir
+  for_each_index_dir _clear_index_buckets
+  if prewarm_index "$url"; then
+    for_each_index_dir lock_index_dir
+    log "已锁定缓存 index：仅审定源 $url，普通用户无法切换源"
+  else
+    warn "预热审定源失败，未锁定 index（保持可用）"
+  fi
+}
+
+_clear_index_buckets() {
+  local dir="$1"
+  rm -rf "${dir:?}"/* 2>/dev/null || true
+}
+
 cmd_mirror() {
+  need_root
   require_admin
   acquire_muv_lock
   local url="${1:-}"
@@ -255,6 +330,7 @@ cmd_mirror() {
     log "选择镜像: $url"
   fi
   write_index "$url"
+  relock_index_for_url "$url"
 }
 
 _do_grant()  { usermod -aG "$UV_GROUP" "$1" && log "$1 已加入 $UV_GROUP（需重新登录生效）"; }
@@ -277,6 +353,14 @@ cmd_update() {
   rm -rf "$tmp"
   trap - EXIT
   log "uv 已更新: $old -> $new"
+
+  # uv 升级可能让缓存版本目录跳号（simple-v21→v22 等），新目录无锁。
+  # 若已配置审定源，重新预热并锁定。
+  local cfg_index
+  cfg_index="$(read_config_var MUV_DEFAULT_INDEX 2>/dev/null || true)"
+  if [ -n "$cfg_index" ]; then
+    relock_index_for_url "$cfg_index"
+  fi
 }
 
 cmd_python() {
@@ -359,6 +443,27 @@ cmd_doctor() {
   fi
   index_url="$(read_config_var MUV_DEFAULT_INDEX 2>/dev/null || true)"
   [ -n "$index_url" ] && echo "  镜像源: $index_url" || echo "  镜像源: 未配置"
+
+  if [ -z "$index_url" ]; then
+    echo "  index 锁: 未启用（未配置审定源）"
+  else
+    local idx_total=0 idx_locked=0 d
+    for d in "$UV_ROOT"/cache/simple-v*/index "$UV_ROOT"/cache/wheels-v*/index; do
+      [ -d "$d" ] || continue
+      idx_total=$((idx_total + 1))
+      index_dir_is_locked "$d" && idx_locked=$((idx_locked + 1))
+    done
+    if [ "$idx_total" -eq 0 ]; then
+      echo "  index 锁: 暂无 index 目录（尚未拉取过包）"
+    elif [ "$idx_locked" -eq "$idx_total" ]; then
+      echo "  index 锁: OK（$idx_locked/$idx_total）"
+    else
+      echo "  index 锁: 未锁定（$idx_locked/$idx_total，普通用户可切换源写入新桶）"
+      warn "以 sudo muv mirror $index_url 重新锁定"
+      ok=0
+    fi
+  fi
+
   [ "$ok" -eq 1 ] && log "检查通过" || { warn "存在问题，见上"; return 1; }
 }
 
@@ -505,6 +610,7 @@ cmd_install() {
 
   setup_python "$default_python"
   fix_root_cache
+  [ -n "$index_url" ] && relock_index_for_url "$index_url"
   "$UV_ROOT/bin/muv" doctor
 
   cat <<EOF

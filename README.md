@@ -96,12 +96,12 @@ uv pip install requests       # 命中共享缓存
 | `muv install [--prefix d] [--group g] [--index url\|auto] [--python X.Y]` | 安装/修复共享环境;`--python` 默认 `3.12` | root |
 | `muv grant <user>...` | 将用户加入 `uvusers` 组 | root |
 | `muv revoke <user>...` | 将用户移出 `uvusers` 组 | root |
-| `muv mirror [<url>]` | 替换镜像源;省略 url 时通过 cnpip 测速自动选择最快 | uvusers 成员 |
+| `muv mirror [<url>]` | 替换镜像源并锁定缓存 index;省略 url 时通过 cnpip 测速自动选择最快 | root |
 | `muv update` | 从官网下载最新 uv 并替换共享二进制 | root |
 | `muv python add <ver>` | 安装共享 Python | uvusers 成员 |
 | `muv python rm [--yes] <ver>` | 删除共享 Python(默认从终端确认;脚本化需显式 `--yes`) | uvusers 成员 |
 | `muv python list` | 列出已安装的共享 Python | 任何人 |
-| `muv doctor` | 自检:组 / 权限 / ACL / 二进制 / 当前源 | 任何人 |
+| `muv doctor` | 自检:组 / 权限 / ACL / 二进制 / 当前源 / index 锁 | 任何人 |
 | `muv help` | 显示帮助 | 任何人 |
 | `muv --version` | 显示 muv 版本 | 任何人 |
 
@@ -126,6 +126,7 @@ $PREFIX/                   # 默认 /opt/uv
 - **default ACL + sticky cache** —— 共享目录使用目录级 default ACL,保证新建文件对组(及 `cache` 的 others)可写,`env.sh` 不修改用户 umask。`cache/` 使用 sticky bit,普通用户不能删除其他用户拥有的缓存目录项。
 - **保护 uv/muv** —— `bin/` 为 `2775 root:uvusers` 且 ACL `other::r-x`:非 uvusers 用户既无法修改 `bin/uv` / `bin/muv` 内容,也无法在 `bin/` 内替换它们,在文件系统层面强制"仅 uv 管理员可管理 uv"。`muv` 的成员校验仅用于提供更友好的报错,并非唯一防线。
 - **hardlink** —— `UV_LINK_MODE=hardlink` 使多用户 venv 共享缓存数据块,要求缓存与用户 home 在同一文件系统分区,跨分区时自动退化为复制(安装时会提示)。
+- **源锁定** —— uv 缓存按"源 URL"在 `cache/simple-v*/index/` 与 `wheels-v*/index/` 下分桶。配置审定源后,`muv install` / `muv mirror` 会把这两层 `index/` 目录 chown 为 `root` 并将 ACL `mask`/`other` 降为 `r-x`(default ACL 保持 `rwx`,新审定桶仍世界可写)。效果:**只有 root 能在 `index/` 下新建桶**,普通用户用 `uv pip install --default-index <其它源>` 切换源时因无法建桶而失败,从而无法向共享缓存写入新的源。审定桶本身保持可写,正常安装不受影响。换源由 root 执行,走"解锁 → 清空旧桶 → 用新源预热建桶 → 重新锁定";`uv` 升级可能令缓存版本目录跳号,故 `muv update` 会自动重新锁定。`muv doctor` 会报告 index 锁状态。
 
 ## 配置(env.sh / config.env)
 
@@ -133,7 +134,7 @@ $PREFIX/                   # 默认 /opt/uv
 |------|----|----------|
 | `UV_ROOT` / `UV_GROUP` | 安装前缀 / 管理员组(可被环境覆盖) | — |
 | `UV_CACHE_DIR` | `$UV_ROOT/cache` | 所有用户 |
-| `UV_DEFAULT_INDEX` | 镜像源(由 `muv install` / `muv mirror` 写入 `config.env`,可被用户预设覆盖) | 所有用户 |
+| `UV_DEFAULT_INDEX` | 镜像源(由 `muv install` / `muv mirror` 写入 `config.env`;用户可预设环境变量改变自身解析源,但锁定后无法向共享缓存写入新源桶) | 所有用户 |
 | `UV_PYTHON_INSTALL_DIR` / `UV_PYTHON_CACHE_DIR` | `$UV_ROOT/python` / `python-cache` | 所有用户 |
 | `UV_MANAGED_PYTHON` | `true` | 所有用户 |
 | `UV_PYTHON_DOWNLOADS` | `never`(普通用户)/ `manual`(管理员) | 分层 |
@@ -143,12 +144,13 @@ $PREFIX/                   # 默认 /opt/uv
 
 ## 角色与权限
 
-常规使用无需 sudo。`muv install` / `muv grant` / `muv revoke` / `muv update` 需要 root;`muv mirror` / `muv python add` / `muv python rm` 需要 `uvusers` 成员身份;`muv python list` / `muv doctor` / `muv help` 任意用户均可执行。
+常规使用无需 sudo。`muv install` / `muv grant` / `muv revoke` / `muv update` / `muv mirror` 需要 root;`muv python add` / `muv python rm` 需要 `uvusers` 成员身份;`muv python list` / `muv doctor` / `muv help` 任意用户均可执行。
 
 | 操作 | 管理员 | 普通用户 |
 |------|--------|----------|
-| 运行 `uv`/`uvx`、写入共享缓存与使用镜像源 | ✅ | ✅ |
+| 运行 `uv`/`uvx`、向审定源缓存桶写入 | ✅ | ✅ |
 | 使用已安装的 Python | ✅ | ✅ |
+| 切换审定源 / 向共享缓存写入新源桶 | ❌(仅 root) | ❌ |
 | 安装 Python 到共享目录 | ✅ | ❌ |
 | 删除共享 Python | ✅ | ❌ |
 | 创建 Python symlink 到 `$UV_ROOT/bin/` | ✅ | ❌ |

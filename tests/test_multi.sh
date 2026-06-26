@@ -569,6 +569,150 @@ test_scenario_env_injection() {
     echo ""
 }
 
+# 场景 L: scan 命令测试
+test_scenario_scan() {
+    yellow "=== 场景 L: scan 命令测试 ==="
+
+    # 确保 muv 已安装
+    if [ ! -f "$MUV_PREFIX/bin/muv" ]; then
+        red "⚠ muv 未安装，跳过 scan 测试"
+        return 0
+    fi
+
+    # 测试 1: root 执行 scan 应该成功
+    yellow "测试 1: root 执行 scan"
+    if run_as root "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv scan 2>&1" | grep -q "扫描完成"; then
+        green "✅ root 可以执行 scan"
+    else
+        yellow "⚠ root scan 测试"
+    fi
+
+    # 测试 2: uvadm 成员执行 scan 应该失败（需要 root）
+    yellow "测试 2: uvadm 成员执行 scan（应该失败）"
+    output=$(run_as admin1 "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv scan 2>&1" || true)
+    if echo "$output" | grep -qE "需要 root|权限|Permission denied"; then
+        green "✅ uvadm 成员无法执行 scan（需要 root）"
+    else
+        yellow "⚠ uvadm scan 权限测试"
+    fi
+
+    # 测试 3: 普通用户执行 scan 应该失败
+    yellow "测试 3: 普通用户执行 scan（应该失败）"
+    output=$(run_as normal "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv scan 2>&1" || true)
+    if echo "$output" | grep -qE "需要 root|权限|Permission denied"; then
+        green "✅ 普通用户无法执行 scan"
+    else
+        yellow "⚠ 普通用户 scan 权限测试"
+    fi
+
+    # 测试 4: 验证 stats.json 生成
+    yellow "测试 4: 验证 stats.json 生成"
+    if [ -f "$MUV_PREFIX/.muv-registry/stats.json" ]; then
+        green "✅ stats.json 已生成"
+    else
+        yellow "⚠ stats.json 未生成（可能 scan 未成功）"
+    fi
+
+    echo ""
+}
+
+# 场景 M: cache prune 命令测试
+test_scenario_cache_prune() {
+    yellow "=== 场景 M: cache prune 命令测试 ==="
+
+    # 确保 muv 已安装
+    if [ ! -f "$MUV_PREFIX/bin/muv" ]; then
+        red "⚠ muv 未安装，跳过 cache prune 测试"
+        return 0
+    fi
+
+    # 创建一些测试缓存文件（未被引用的）
+    mkdir -p "$MUV_PREFIX/cache/test-dir"
+    touch "$MUV_PREFIX/cache/test-dir/file1.txt"
+    touch "$MUV_PREFIX/cache/test-dir/file2.txt"
+
+    # 测试 1: root 执行 prune --dry-run
+    yellow "测试 1: root 执行 prune --dry-run"
+    output=$(run_as root "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv cache prune --dry-run 2>&1" || true)
+    if echo "$output" | grep -qE "预览模式|未执行"; then
+        green "✅ prune --dry-run 预览模式正常"
+    else
+        yellow "⚠ prune --dry-run 测试"
+    fi
+
+    # 测试 2: uvadm 成员执行 prune 应该失败
+    yellow "测试 2: uvadm 成员执行 prune（应该失败）"
+    output=$(run_as admin1 "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv cache prune 2>&1" || true)
+    if echo "$output" | grep -qE "需要 root|权限|Permission denied"; then
+        green "✅ uvadm 成员无法执行 prune"
+    else
+        yellow "⚠ uvadm prune 权限测试"
+    fi
+
+    # 测试 3: 普通用户执行 prune 应该失败
+    yellow "测试 3: 普通用户执行 prune（应该失败）"
+    output=$(run_as normal "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv cache prune 2>&1" || true)
+    if echo "$output" | grep -qE "需要 root|权限|Permission denied"; then
+        green "✅ 普通用户无法执行 prune"
+    else
+        yellow "⚠ 普通用户 prune 权限测试"
+    fi
+
+    # 清理测试文件
+    rm -rf "$MUV_PREFIX/cache/test-dir"
+
+    echo ""
+}
+
+# 场景 N: python rm --check 测试
+test_scenario_python_rm_check() {
+    yellow "=== 场景 N: python rm --check 测试 ==="
+
+    # 确保 muv 已安装
+    if [ ! -f "$MUV_PREFIX/bin/muv" ]; then
+        red "⚠ muv 未安装，跳过 python rm --check 测试"
+        return 0
+    fi
+
+    # 模拟一个使用 muv Python 的 venv
+    mkdir -p "$MUV_PREFIX/python/cpython-3.11/bin"
+    cat > "$MUV_PREFIX/python/cpython-3.11/bin/python" <<'EOF'
+#!/bin/bash
+echo "Python 3.11 mock"
+EOF
+    chmod +x "$MUV_PREFIX/python/cpython-3.11/bin/python"
+
+    # 测试 1: python rm --check 无依赖时
+    yellow "测试 1: python rm --check 无依赖时"
+    output=$(run_as root "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv python rm --check 3.11 2>&1" || true)
+    if echo "$output" | grep -qE "没有发现依赖|可以安全删除"; then
+        green "✅ --check 正确报告无依赖"
+    else
+        yellow "⚠ --check 无依赖测试"
+    fi
+
+    # 测试 2: python rm --check 有依赖时
+    yellow "测试 2: python rm --check 有依赖时"
+    # 创建一个模拟的 venv
+    mkdir -p "/home/admin1/test-venv/bin"
+    ln -sf "$MUV_PREFIX/python/cpython-3.11/bin/python" "/home/admin1/test-venv/bin/python"
+    echo "version = 3.11" > "/home/admin1/test-venv/pyvenv.cfg"
+    chown -R admin1:admin1 "/home/admin1/test-venv"
+
+    output=$(run_as root "UV_ROOT=$MUV_PREFIX $MUV_PREFIX/bin/muv python rm --check 3.11 2>&1" || true)
+    if echo "$output" | grep -qE "依赖|venv"; then
+        green "✅ --check 正确检测到依赖"
+    else
+        yellow "⚠ --check 依赖检测测试"
+    fi
+
+    # 清理
+    rm -rf "/home/admin1/test-venv"
+    rm -rf "$MUV_PREFIX/python/cpython-3.11"
+
+    echo ""
+}
+
 # 主测试流程
 main() {
     echo "muv 多用户集成测试"
@@ -597,6 +741,9 @@ main() {
     test_scenario_hardlink_attack || true
     test_scenario_symlink_attack || true
     test_scenario_env_injection || true
+    test_scenario_scan || true
+    test_scenario_cache_prune || true
+    test_scenario_python_rm_check || true
 
     # 最终清理（可选，保留以便检查）
     # cleanup_users

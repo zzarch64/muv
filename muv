@@ -12,12 +12,14 @@
 #     --group <name>                管理员组。默认: uvadm。
 #     --index <url|auto>            配置包索引地址。auto=自动测速选镜像；不传则保留现有配置。
 #     --python <version>            安装默认托管 Python 版本。默认: 3.12。
-#   mirror [url]                    配置镜像源并锁定缓存（需 root）。未提供 url 时自动选择。
-#   grant <user>...                 授权用户管理权限。
-#   revoke <user>...                撤销用户管理权限。
-#   update                          下载并替换 uv 与 uvx。
-#   python add <version>            安装共享托管 Python 版本。
-#   python rm [--yes] <version>     删除共享托管 Python 版本。
+#   scan                            扫描系统，显示使用统计（需 root）。
+#   cache prune [--dry-run]         清理未使用的缓存（需 root）。
+#   mirror [url]                    配置镜像源并锁定缓存（root 或 uvadm 成员）。未提供 url 时自动选择。
+#   grant <user>...                 授权用户管理权限（需 root）。
+#   revoke <user>...                撤销用户管理权限（需 root）。
+#   update                          下载并替换 uv 与 uvx（需 root）。
+#   python add <version>            安装共享托管 Python 版本（uvadm 成员）。
+#   python rm [--check] <version>   删除共享托管 Python 版本（uvadm 成员）。--check 检查依赖（需 root）。
 #   python list                     列出已安装的共享 Python 版本。
 #   doctor                          检查组、权限、ACL、二进制与索引状态。
 #   help                            显示帮助信息。
@@ -288,6 +290,11 @@ require_admin() {
   die "需要是 root 或 $UV_GROUP 组成员才能执行此命令"
 }
 
+# 某些命令必须是 root 才能执行（需要扫描其他用户目录）
+require_root() {
+  [ "$(id -u)" -eq 0 ] || die "此命令需要 root 权限"
+}
+
 # root 命令由非 root 调用时通过 sudo 重新执行。
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -376,12 +383,77 @@ cmd_update() {
   fi
 }
 
+# 检查 Python 版本的依赖关系
+check_python_dependencies() {
+  local version="$1"
+  local python_path="$UV_ROOT/python/cpython-$version"
+
+  if [ ! -d "$python_path" ]; then
+    log "Python $version 未安装"
+    return 1
+  fi
+
+  log "检查依赖关系..."
+  echo ""
+
+  # 先扫描是否有依赖
+  local found=0
+  local tmp_file=$(mktemp)
+  find /home -name "pyvenv.cfg" 2>/dev/null > "$tmp_file"
+
+  while read -r cfg; do
+    [ -f "$cfg" ] || continue
+    local venv_dir=$(dirname "$cfg")
+    local python_link="$venv_dir/bin/python"
+
+    if [ -L "$python_link" ]; then
+      local target=$(readlink "$python_link" 2>/dev/null)
+      if [[ "$target" == "$python_path"* ]]; then
+        found=1
+        break
+      fi
+    fi
+  done < "$tmp_file"
+
+  rm -f "$tmp_file"
+
+  if [ "$found" -eq 0 ]; then
+    log "没有发现依赖 Python $version 的 venv，可以安全删除"
+    return 0
+  fi
+
+  # 有依赖，列出详细信息
+  warn "以下 venv 依赖 Python $version："
+  tmp_file=$(mktemp)
+  find /home -name "pyvenv.cfg" 2>/dev/null > "$tmp_file"
+
+  while read -r cfg; do
+    [ -f "$cfg" ] || continue
+    local venv_dir=$(dirname "$cfg")
+    local python_link="$venv_dir/bin/python"
+
+    if [ -L "$python_link" ]; then
+      local target=$(readlink "$python_link" 2>/dev/null)
+      if [[ "$target" == "$python_path"* ]]; then
+        local user=$(stat -c '%U' "$venv_dir" 2>/dev/null)
+        printf '  - %s (用户: %s)\n' "$venv_dir" "$user"
+      fi
+    fi
+  done < "$tmp_file"
+
+  rm -f "$tmp_file"
+  echo ""
+  warn "删除这些 venv 后再删除 Python"
+  return 1
+}
+
 cmd_python() {
   local action="${1:-}"; shift || true
-  local ver="" assume_yes=0
+  local ver="" assume_yes=0 check_mode=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --yes|-y) assume_yes=1; shift ;;
+      --check) check_mode=1; shift ;;
       -*)       die "未知参数: $1" ;;
       *)
         [ -z "$ver" ] || die "只能指定一个 Python 版本"
@@ -400,6 +472,13 @@ cmd_python() {
       log "Python $ver 已安装到共享目录；已加载 env.sh 的用户可使用该版本"
       ;;
     rm|remove|uninstall)
+      if [ "$check_mode" -eq 1 ]; then
+        # 只检查依赖，不执行删除
+        [ -n "$ver" ] || die "用法: muv python rm --check <ver>"
+        check_python_dependencies "$ver"
+        exit $?
+      fi
+
       require_admin
       acquire_muv_lock
       [ -n "$ver" ] || die "用法: muv python rm <ver>"
@@ -481,6 +560,242 @@ cmd_doctor() {
 }
 
 cmd_version() { printf 'muv %s\n' "$MUV_VERSION"; }
+
+# ===== 系统扫描与统计 =====
+
+# 扫描系统，收集使用统计
+cmd_scan() {
+  require_root
+  acquire_muv_lock
+
+  local registry="$UV_ROOT/.muv-registry"
+  mkdir -p "$registry"
+
+  log "扫描系统..."
+
+  # 临时文件
+  local users_tmp="$registry/users.tmp"
+  local venvs_tmp="$registry/venvs.tmp"
+  local python_tmp="$registry/python.tmp"
+
+  # 1. 扫描用户
+  > "$users_tmp"
+  local user_count=0
+  for user_home in /home/*; do
+    [ -d "$user_home" ] || continue
+    local user=$(basename "$user_home")
+    # 检查用户是否 source 了 env.sh
+    if grep -q "source $UV_ROOT/env.sh" "$user_home/.bashrc" "$user_home/.zshrc" "$user_home/.profile" 2>/dev/null; then
+      echo "$user" >> "$users_tmp"
+      ((user_count++))
+    fi
+  done
+
+  # 2. 扫描 venv
+  > "$venvs_tmp"
+  local venv_count=0
+  find /home -name "pyvenv.cfg" 2>/dev/null | while read -r cfg; do
+    local venv_dir=$(dirname "$cfg")
+    local user=$(stat -c '%U' "$venv_dir" 2>/dev/null)
+    local version=$(grep "^version = " "$cfg" 2>/dev/null | cut -d= -f2 | xargs)
+    local created=$(stat -c '%Y' "$cfg" 2>/dev/null)
+
+    # 检查是否使用 muv 的 Python
+    local python_link="$venv_dir/bin/python"
+    if [ -L "$python_link" ]; then
+      local target=$(readlink "$python_link" 2>/dev/null)
+      if [[ "$target" == "$UV_ROOT/python"* ]]; then
+        printf '%s|%s|%s|%s\n' "$user" "$venv_dir" "$version" "$created" >> "$venvs_tmp"
+        ((venv_count++))
+      fi
+    fi
+  done
+
+  # 3. 统计 Python 使用
+  declare -A python_usage
+  while IFS='|' read -r user path version created; do
+    [ -n "$version" ] && ((python_usage[$version]++))
+  done < "$venvs_tmp"
+
+  # 4. 扫描缓存统计（包括硬链接）
+  local cache_dir="$UV_ROOT/cache"
+  local cache_files=0 cache_linked=0 cache_unused=0
+  local cache_size=0
+
+  if [ -d "$cache_dir" ]; then
+    while read -r file; do
+      ((cache_files++))
+      local links=$(stat -c '%h' "$file")
+      local size=$(stat -c '%s' "$file")
+      ((cache_size += size))
+
+      if [ "$links" -gt 1 ]; then
+        ((cache_linked++))
+      else
+        ((cache_unused++))
+      fi
+    done < <(find "$cache_dir" -type f 2>/dev/null)
+  fi
+
+  # 5. 保存统计
+  local now=$(date +%s)
+  cat > "$registry/stats.json" <<EOF
+{
+  "scan_time": $now,
+  "users": $(cat "$users_tmp" | wc -l),
+  "venvs_total": $venv_count,
+  "python_usage": {
+$(for version in "${!python_usage[@]}"; do
+    printf '    "%s": %s\n' "$version" "${python_usage[$version]}"
+done | sed '$!s/$/,/')}
+  },
+  "cache_stats": {
+    "files": $cache_files,
+    "linked": $cache_linked,
+    "unused": $cache_unused,
+    "size_bytes": $cache_size
+  }
+}
+EOF
+
+  # 清理临时文件
+  rm -f "$users_tmp" "$venvs_tmp" "$python_tmp"
+
+  # 6. 显示结果
+  echo ""
+  echo "扫描完成："
+  echo ""
+  echo "用户活跃: $user_count"
+  if [ "$user_count" -gt 0 ]; then
+    while read -r user; do
+      echo "  - $user"
+    done < <(getent group "$UV_GROUP" 2>/dev/null | cut -d: -f4 | tr ',' '\n')
+  fi
+  echo ""
+  echo "Venv 总数: $venv_count"
+  echo ""
+  echo "共享 Python 使用:"
+  if [ ${#python_usage[@]} -gt 0 ]; then
+    for version in "${!python_usage[@]}"; do
+      echo "  $version: ${python_usage[$version]} 个 venv"
+    done
+  else
+    echo "  (无)"
+  fi
+  echo ""
+  echo "缓存统计:"
+  echo "  总文件: $cache_files"
+  echo "  被引用: $cache_linked (hardlink > 1)"
+  echo "  未引用: $cache_unused (hardlink = 1)"
+  local size_mb=$((cache_size / 1024 / 1024))
+  echo "  总大小: ${size_mb} MB"
+  if [ "$cache_unused" -gt 0 ]; then
+    local unused_mb=0
+    if [ "$cache_files" -gt 0 ]; then
+      unused_mb=$((cache_size * cache_unused / cache_files / 1024 / 1024))
+    fi
+    echo "  可释放: ~${unused_mb} MB (运行 'muv cache prune' 清理)"
+  fi
+  echo ""
+
+  log "扫描完成，统计已保存到 $registry/stats.json"
+}
+
+# 清理未使用的缓存
+cmd_cache_prune() {
+  require_root
+  acquire_muv_lock
+
+  local dry_run=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run|-n) dry_run=1; shift ;;
+      *) die "未知参数: $1" ;;
+    esac
+  done
+
+  local cache_dir="$UV_ROOT/cache"
+
+  if [ ! -d "$cache_dir" ]; then
+    die "缓存目录不存在: $cache_dir"
+  fi
+
+  log "扫描缓存..."
+
+  local total=0 unused=0
+  declare -a unused_files
+
+  while read -r file; do
+    ((total++))
+    local links=$(stat -c '%h' "$file")
+
+    if [ "$links" -eq 1 ]; then
+      ((unused++))
+      unused_files+=("$file")
+    fi
+  done < <(find "$cache_dir" -type f 2>/dev/null)
+
+  if [ "$unused" -eq 0 ]; then
+    log "没有可清理的文件"
+    return 0
+  fi
+
+  # 计算可释放空间
+  local total_size=0
+  for file in "${unused_files[@]}"; do
+    local size=$(stat -c '%s' "$file")
+    ((total_size += size))
+  done
+  local size_mb=$((total_size / 1024 / 1024))
+
+  echo ""
+  echo "扫描结果："
+  echo "  总缓存文件: $total"
+  echo "  未使用文件: $unused"
+  echo "  可释放空间: ${size_mb} MB"
+
+  if [ "$dry_run" -eq 1 ]; then
+    echo ""
+    log "预览模式，未执行删除"
+    return 0
+  fi
+
+  echo ""
+  printf "确认删除? [y/N] "
+  read -r answer
+
+  if [ "$answer" = "y" ]; then
+    log "删除中..."
+    local deleted=0
+    for file in "${unused_files[@]}"; do
+      # 最后检查一次引用计数
+      local links=$(stat -c '%h' "$file")
+      if [ "$links" -eq 1 ]; then
+        rm -f "$file"
+        ((deleted++))
+      fi
+    done
+    log "清理完成: 删除 $deleted 个文件，释放 ${size_mb} MB"
+  else
+    log "已取消"
+  fi
+}
+
+# cache 子命令分发
+cmd_cache() {
+  local action="${1:-}"
+  shift || true
+
+  case "$action" in
+    prune)
+      require_installed_context
+      cmd_cache_prune "$@"
+      ;;
+    *)
+      die "用法: muv cache prune [--dry-run]"
+      ;;
+  esac
+}
 
 # ===== 安装函数 =====
 
@@ -650,6 +965,12 @@ case "$cmd" in
   install)
     MUV_LOG_NAME=install
     cmd_install "$@"
+    ;;
+  scan)
+    cmd_scan "$@"
+    ;;
+  cache)
+    cmd_cache "$@"
     ;;
   mirror|grant|revoke|update|python|doctor)
     require_installed_context

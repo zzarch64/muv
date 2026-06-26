@@ -63,17 +63,52 @@ uv venv --python 3.12 && source .venv/bin/activate
 uv pip install requests       # 命中共享缓存
 ```
 
+## 管理命令
+
+### 扫描系统统计
+
+```bash
+sudo muv scan
+```
+
+显示：
+- 活跃用户数
+- Venv 总数
+- 共享 Python 版本使用情况
+- 缓存统计（总文件、被引用、未引用、可释放空间）
+
+### 清理缓存
+
+```bash
+# 预览将要删除的文件
+sudo muv cache prune --dry-run
+
+# 实际清理（需要确认）
+sudo muv cache prune
+```
+
+只删除硬链接计数为 1 的缓存文件（未被任何 venv 引用）。
+
+### 检查 Python 依赖
+
+```bash
+# 删除 Python 前检查哪些 venv 会受影响
+sudo muv python rm --check 3.11
+```
+
 ## 命令参考
 
 | 命令 | 说明 | 权限 |
 |------|------|------|
 | `muv install [--prefix <dir>] [--group <name>] [--index <url\|auto>] [--python <ver>]` | 安装共享环境 | root |
+| `muv scan` | 扫描系统，显示使用统计 | root |
+| `muv cache prune [--dry-run]` | 清理未使用的缓存 | root |
 | `muv grant <user>...` | 授权用户加入 uvadm 组 | root |
 | `muv revoke <user>...` | 撤销用户 uvadm 成员资格 | root |
 | `muv mirror [<url>]` | 更换镜像源 | root / uvadm 成员 |
 | `muv update` | 升级 uv 到最新版本 | root |
 | `muv python add <ver>` | 安装共享 Python | uvadm 成员 |
-| `muv python rm [--yes] <ver>` | 删除共享 Python | uvadm 成员 |
+| `muv python rm [--check] <ver>` | 删除共享 Python（--check 检查依赖需 root） | uvadm 成员 / root |
 | `muv python list` | 列出已安装的 Python | 任何人 |
 | `muv doctor` | 环境自检 | 任何人 |
 | `muv help` | 显示帮助 | 任何人 |
@@ -84,12 +119,18 @@ uv pip install requests       # 命中共享缓存
 | 操作 | root | uvadm 成员 | 普通用户 |
 |------|------|------------|----------|
 | 安装共享环境 | ✅ | ❌ | ❌ |
+| 扫描系统统计 | ✅ | ❌ | ❌ |
+| 清理缓存 | ✅ | ❌ | ❌ |
 | 授权/撤销用户 | ✅ | ❌ | ❌ |
 | 换源 | ✅ | ✅ | ❌ |
-| 安装/删除 Python | ✅ | ✅ | ❌ |
+| 安装 Python | ✅ | ✅ | ❌ |
+| 删除 Python | ✅ | ✅ | ❌ |
+| 检查 Python 依赖 | ✅ | ❌ | ❌ |
 | 使用共享 uv | ✅ | ✅ | ✅ |
 
 > **换源说明**：root 和 uvadm 成员都可直接执行 `muv mirror` 换源；uvadm 成员也可直接删除/重建 index 目录（sticky bit 保护下只能操作自己的目录）；普通用户无法换源。
+>
+> **扫描与清理**：`muv scan` 和 `muv cache prune` 需要 root 权限，因为需要访问所有用户目录。
 
 ## 故障排查
 

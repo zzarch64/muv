@@ -22,7 +22,7 @@ fi
 _muv_config="${UV_CONFIG_FILE:-${UV_ROOT}/config.env}"
 [ -r "$_muv_config" ] && . "$_muv_config"
 
-UV_GROUP="${UV_GROUP:-${MUV_GROUP:-uvusers}}"
+UV_GROUP="${UV_GROUP:-${MUV_GROUP:-uvadm}}"
 
 # 所有用户都能用的部分
 export UV_CACHE_DIR="${UV_ROOT}/cache"
@@ -45,7 +45,7 @@ case ":$PATH:" in
   *) export PATH="${UV_ROOT}/bin:$PATH" ;;
 esac
 
-# 以下仅 uvusers 组可用：共享工具 + symlink 写入 /opt/uv/bin/
+# 以下仅 uvadm 组可用：共享工具 + symlink 写入 /opt/uv/bin/
 if [ "$(id -u)" -ne 0 ] && ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx "${UV_GROUP}"; then
   return 0 2>/dev/null || exit 0
 fi
